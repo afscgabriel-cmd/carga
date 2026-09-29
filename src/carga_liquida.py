@@ -51,7 +51,7 @@ def _serie(df, col_tempo, col_sub, col_val, nome):
     return d.groupby(["valido_para", "subsistema", "componente"], as_index=False).mw.sum()
 
 
-def ler_carga(engine=None, csv=None):
+def ler_carga(engine=None, csv=None, deslocar=True):
     t0 = time.time()
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
@@ -67,7 +67,7 @@ def ler_carga(engine=None, csv=None):
     rod = d.datarodada.max()
     d = d[d.datarodada == rod]
     s = _serie(d, "valido_para", "mnemonico_subsistema", "val_previsaocarga", "carga")
-    if CARGA_ROTULO_FIM:
+    if CARGA_ROTULO_FIM and deslocar:
         s["valido_para"] = s.valido_para - pd.Timedelta(minutes=30)
     print(f"carga: rodada {rod.date()}, {s.valido_para.min()} a {s.valido_para.max()}, {len(s):,} pontos ({time.time()-t0:.0f}s)", flush=True)
     return s, rod.normalize()
