@@ -49,26 +49,28 @@ def engine_banco():
 def ler_banco(engine, rodada=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
-    Uma única consulta por faixa de rodada_dia (sem MAX sobre a tabela inteira, que sem
-    índice varre tudo). A rodada mais recente é a maior data dentro do resultado.
+    Filtra por valido_para_dia (padrão das consultas da equipe, que usa o índice da tabela),
+    e não por rodada_dia, que força varredura completa. A rodada é filtrada depois, no pandas.
     """
     from sqlalchemy import text
     t0 = time.time()
     fim = pd.Timestamp(rodada) if rodada else pd.Timestamp.today().normalize()
     ini = fim - pd.Timedelta(days=DIAS_PERFIL + 7)
-    print(f"Conectando ao banco e lendo rodadas de {ini.date()} a {fim.date()} (uma consulta)...", flush=True)
+    print(f"Conectando ao banco e lendo valido_para_dia de {ini.date()} a {(fim + pd.Timedelta(days=10)).date()}...", flush=True)
     with engine.connect() as con:
         d = pd.read_sql(text("""
             SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
                    SUM(previsao) AS previsao
             FROM fac_ons_renovaveis
-            WHERE rodada_dia >= :ini AND rodada_dia <= :fim
+            WHERE valido_para_dia >= :ini AND valido_para_dia <= :fim
             GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia
-        """), con, params={"ini": ini.date(), "fim": fim.date()})
+            ORDER BY valido_para_dia DESC
+        """), con, params={"ini": ini.date(), "fim": (fim + pd.Timedelta(days=10)).date()})
     print(f"  {len(d):,} linhas em {time.time()-t0:.0f}s", flush=True)
+    d = _tipar(d)
+    d = d[(d.rodada_dia >= ini) & (d.rodada_dia <= fim)]
     if d.empty:
         raise SystemExit("Nenhuma rodada nesse período.")
-    d = _tipar(d)
     rodada = d.rodada_dia.max()
     print(f"  rodada mais recente: {rodada.date()}", flush=True)
     d0 = d[pd.to_datetime(d.valido_para_dia) == d.rodada_dia]
