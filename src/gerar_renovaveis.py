@@ -20,6 +20,7 @@ Uso:
 """
 import argparse
 import json
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -28,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 CONFIG_PATH = Path(r"C:\Users\afons\OneDrive - Central Energia\ATUALIZAR\database_config.json")
-OUTPUT_DIR = Path("output/renovaveis")
+OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "renovaveis"
 
 FONTES = ["UTE", "PCH", "CGH", "UHE", "MGD"]
 DIAS_PERFIL = 28
@@ -48,11 +49,14 @@ def engine_banco():
 def ler_banco(engine, rodada=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa."""
     from sqlalchemy import text
+    t0 = time.time()
+    print("Conectando ao banco...", flush=True)
     with engine.connect() as con:
         if rodada is None:
             rodada = pd.Timestamp(con.execute(text("SELECT MAX(rodada_dia) FROM fac_ons_renovaveis")).scalar())
         rodada = pd.Timestamp(rodada)
         ini = (rodada - pd.Timedelta(days=DIAS_PERFIL + 7)).date()
+        print(f"Rodada mais recente: {rodada.date()}. Lendo histórico D+0 desde {ini}...", flush=True)
         d0 = pd.read_sql(text("""
             WITH ur AS (SELECT rodada_dia, tipo_fonte_energia, submercado, MAX(rev) rev
                         FROM fac_ons_renovaveis WHERE rodada_dia BETWEEN :ini AND :rod GROUP BY 1,2,3)
@@ -60,12 +64,14 @@ def ler_banco(engine, rodada=None):
             FROM fac_ons_renovaveis r JOIN ur USING (rodada_dia, tipo_fonte_energia, submercado, rev)
             WHERE r.valido_para_dia = r.rodada_dia AND r.rodada_dia BETWEEN :ini AND :rod
             GROUP BY 1,2,3,4"""), con, params={"ini": ini, "rod": rodada.date()})
+        print(f"  {len(d0):,} linhas em {time.time()-t0:.0f}s. Lendo a rodada completa...", flush=True)
         ultima = pd.read_sql(text("""
             WITH ur AS (SELECT tipo_fonte_energia, submercado, MAX(rev) rev
                         FROM fac_ons_renovaveis WHERE rodada_dia = :rod GROUP BY 1,2)
             SELECT r.rodada_dia, r.valido_para, r.tipo_fonte_energia, r.submercado, SUM(r.previsao) previsao
             FROM fac_ons_renovaveis r JOIN ur USING (tipo_fonte_energia, submercado, rev)
             WHERE r.rodada_dia = :rod GROUP BY 1,2,3,4"""), con, params={"rod": rodada.date()})
+        print(f"  {len(ultima):,} linhas em {time.time()-t0:.0f}s.", flush=True)
     return _tipar(d0), _tipar(ultima)
 
 
