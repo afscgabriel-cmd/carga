@@ -49,31 +49,28 @@ def engine_banco():
 def ler_banco(engine, rodada=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
-    Consultas no mesmo formato do atualizar_renovaveis_dessem.py (filtro simples por
-    rodada_dia). A coluna rev (revisão semanal do PMO) não importa aqui: só a rodada mais recente.
+    Uma única consulta por faixa de rodada_dia (sem MAX sobre a tabela inteira, que sem
+    índice varre tudo). A rodada mais recente é a maior data dentro do resultado.
     """
     from sqlalchemy import text
     t0 = time.time()
-    print("Conectando ao banco...", flush=True)
-    sql = text("""
-        SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
-               SUM(previsao) AS previsao
-        FROM fac_ons_renovaveis
-        WHERE rodada_dia >= :ini AND rodada_dia < :fim
-        GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia
-    """)
+    fim = pd.Timestamp(rodada) if rodada else pd.Timestamp.today().normalize()
+    ini = fim - pd.Timedelta(days=DIAS_PERFIL + 7)
+    print(f"Conectando ao banco e lendo rodadas de {ini.date()} a {fim.date()} (uma consulta)...", flush=True)
     with engine.connect() as con:
-        if rodada is None:
-            rodada = con.execute(text("SELECT MAX(rodada_dia) FROM fac_ons_renovaveis")).scalar()
-        rodada = pd.Timestamp(rodada)
-        ini = rodada - pd.Timedelta(days=DIAS_PERFIL + 7)
-        print(f"Rodada mais recente: {rodada.date()}. Lendo de {ini.date()} a {rodada.date()}...", flush=True)
-        partes = []
-        for a in pd.date_range(ini, rodada, freq="7D"):
-            b = min(a + pd.Timedelta(days=7), rodada + pd.Timedelta(days=1))
-            partes.append(pd.read_sql(sql, con, params={"ini": a.date(), "fim": b.date()}))
-            print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas ({time.time()-t0:.0f}s)", flush=True)
-    d = _tipar(pd.concat(partes, ignore_index=True))
+        d = pd.read_sql(text("""
+            SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
+                   SUM(previsao) AS previsao
+            FROM fac_ons_renovaveis
+            WHERE rodada_dia >= :ini AND rodada_dia <= :fim
+            GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia
+        """), con, params={"ini": ini.date(), "fim": fim.date()})
+    print(f"  {len(d):,} linhas em {time.time()-t0:.0f}s", flush=True)
+    if d.empty:
+        raise SystemExit("Nenhuma rodada nesse período.")
+    d = _tipar(d)
+    rodada = d.rodada_dia.max()
+    print(f"  rodada mais recente: {rodada.date()}", flush=True)
     d0 = d[pd.to_datetime(d.valido_para_dia) == d.rodada_dia]
     ultima = d[d.rodada_dia == rodada]
     return d0, ultima
@@ -148,7 +145,7 @@ def formatar(df: pd.DataFrame) -> pd.DataFrame:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--horizonte", type=int, default=10, help="dias após a rodada a cobrir (padrão 10, como o deck solar)")
-    ap.add_argument("--rodada", help="data da rodada (padrão: a mais recente do banco)")
+    ap.add_argument("--rodada", help="data-limite da rodada (padrão: hoje; usa a mais recente até essa data)")
     ap.add_argument("--csv", help="modo de teste: extrato de 30 min em vez do banco")
     a = ap.parse_args()
 
