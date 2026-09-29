@@ -29,7 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
-PASTA_DECKS = Path(r"C:\Users\afons\Downloads")   # onde os Deck_Previsao_*.zip são salvos
+PASTA_DECKS = Path(r"C:\Users\afons\OneDrive - Central Energia\ATUALIZAR\previsao_solar_deck")
 SUBSISTEMAS = {"SE": (1, "Sudeste"), "S": (2, "Sul"), "NE": (3, "Nordeste"), "N": (4, "Norte")}
 
 PADRAO_ARQ = re.compile(r"Previsoes_(?P<regiao>[A-Z]+)_(?P<deck>\d{8})_(?P<dia>\d{8})\.txt$", re.I)
@@ -113,10 +113,10 @@ def formato_longo(meia: pd.DataFrame, deck: str) -> pd.DataFrame:
 
 
 def deck_mais_recente(pasta: Path) -> Path:
-    zips = sorted(pasta.glob("Deck_Previsao_*.zip"))
+    zips = [z for z in pasta.glob("Deck_Previsao_*.zip") if re.search(r"Deck_Previsao_(\d{8})", z.name)]
     if not zips:
         raise SystemExit(f"Nenhum Deck_Previsao_*.zip em {pasta}")
-    return zips[-1]
+    return max(zips, key=lambda z: re.search(r"Deck_Previsao_(\d{8})", z.name)[1])
 
 
 def grafico_linha_do_tempo(h: pd.DataFrame, arq: Path, deck: str):
