@@ -50,17 +50,17 @@ def ler_banco(engine, rodada=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
     Consultas no mesmo formato do atualizar_renovaveis_dessem.py (filtro simples por
-    rodada_dia, agregação por rev); a rev máxima é escolhida no pandas.
+    rodada_dia). A coluna rev (revisão semanal do PMO) não importa aqui: só a rodada mais recente.
     """
     from sqlalchemy import text
     t0 = time.time()
     print("Conectando ao banco...", flush=True)
     sql = text("""
-        SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia, rev,
+        SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
                SUM(previsao) AS previsao
         FROM fac_ons_renovaveis
         WHERE rodada_dia >= :ini AND rodada_dia < :fim
-        GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia, rev
+        GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia
     """)
     with engine.connect() as con:
         if rodada is None:
@@ -74,9 +74,6 @@ def ler_banco(engine, rodada=None):
             partes.append(pd.read_sql(sql, con, params={"ini": a.date(), "fim": b.date()}))
             print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas ({time.time()-t0:.0f}s)", flush=True)
     d = _tipar(pd.concat(partes, ignore_index=True))
-    # rev máxima por rodada/fonte/submercado
-    mx = d.groupby(["rodada_dia", "tipo_fonte_energia", "submercado"]).rev.transform("max")
-    d = d[d.rev == mx].drop(columns="rev")
     d0 = d[pd.to_datetime(d.valido_para_dia) == d.rodada_dia]
     ultima = d[d.rodada_dia == rodada]
     return d0, ultima
