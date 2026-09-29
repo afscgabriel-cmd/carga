@@ -13,10 +13,11 @@ Saída: CSV longo no mesmo padrão das bases de carga/eólica:
     cd_subsistema, mnemonico_subsistema, nome_subsistema, tipo_fonte_energia, origem
 origem = "DESSEM" para os dias que a rodada cobre, "PERFIL" para os estendidos.
 
-Uso:
-    python src/gerar_renovaveis.py                      # lê o banco (database_config.json)
-    python src/gerar_renovaveis.py --horizonte 10
-    python src/gerar_renovaveis.py --csv data/renov_30min_2025.zip --rodada 2026-09-25   # teste sem banco
+Uso (padrão: lê o prev_renovaveis_dessem.csv mantido pelo atualizar_renovaveis_dessem.py):
+    python gerar_renovaveis.py
+    python gerar_renovaveis.py --horizonte 10
+    python gerar_renovaveis.py --csv "C:\\caminho\\prev_renovaveis_dessem.csv"
+    python gerar_renovaveis.py --banco          # consulta o banco em vez do CSV
 """
 import argparse
 import json
@@ -29,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 CONFIG_PATH = Path(r"C:\Users\afons\OneDrive - Central Energia\ATUALIZAR\database_config.json")
+CSV_DESSEM = Path(r"C:\Users\afons\OneDrive - Central Energia\ATUALIZAR\prev_renovaveis_dessem.csv")
 OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "renovaveis"
 
 FONTES = ["UTE", "PCH", "CGH", "UHE", "MGD"]
@@ -78,14 +80,29 @@ def ler_banco(engine, rodada=None):
     return d0, ultima
 
 
-def ler_csv(caminho, rodada):
-    """Modo de teste: usa o extrato de 30 min (só D+0) e finge que a rodada cobre apenas o próprio dia."""
-    z = zipfile.ZipFile(caminho)
-    d = pd.read_csv(z.open(z.namelist()[0]), sep=";", decimal=",")
+def ler_csv(caminho, rodada=None):
+    """Lê o prev_renovaveis_dessem.csv (saída do atualizar_renovaveis_dessem.py) ou o extrato zip de teste."""
+    caminho = Path(caminho)
+    t0 = time.time()
+    print(f"Lendo {caminho.name}...", flush=True)
+    if caminho.suffix.lower() == ".zip":
+        z = zipfile.ZipFile(caminho)
+        d = pd.read_csv(z.open(z.namelist()[0]), sep=";", decimal=",")
+    else:
+        d = pd.read_csv(caminho, sep=";", decimal=",", encoding="utf-8-sig")
+    if "previsao_mw" in d.columns:
+        d = d.rename(columns={"previsao_mw": "previsao"})
     d = _tipar(d)
-    rodada = pd.Timestamp(rodada)
-    d0 = d[(d.rodada_dia > rodada - pd.Timedelta(days=DIAS_PERFIL + 7)) & (d.rodada_dia <= rodada)]
-    return d0, d0[d0.rodada_dia == rodada]
+    print(f"  {len(d):,} linhas em {time.time()-t0:.0f}s", flush=True)
+    fim = pd.Timestamp(rodada) if rodada else d.rodada_dia.max()
+    ini = fim - pd.Timedelta(days=DIAS_PERFIL + 7)
+    d = d[(d.rodada_dia >= ini) & (d.rodada_dia <= fim)]
+    if d.empty:
+        raise SystemExit("Nenhuma rodada nesse período.")
+    rodada = d.rodada_dia.max()
+    print(f"  rodada mais recente: {rodada.date()}", flush=True)
+    d0 = d[d.valido_para.dt.normalize() == d.rodada_dia]
+    return d0, d[d.rodada_dia == rodada]
 
 
 def _tipar(d):
@@ -148,13 +165,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--horizonte", type=int, default=10, help="dias após a rodada a cobrir (padrão 10, como o deck solar)")
     ap.add_argument("--rodada", help="data-limite da rodada (padrão: hoje; usa a mais recente até essa data)")
-    ap.add_argument("--csv", help="modo de teste: extrato de 30 min em vez do banco")
+    ap.add_argument("--csv", default=str(CSV_DESSEM), help="CSV do atualizar_renovaveis_dessem.py (padrão) ou extrato zip")
+    ap.add_argument("--banco", action="store_true", help="consultar o banco em vez do CSV")
     a = ap.parse_args()
 
-    if a.csv:
-        d0, ultima = ler_csv(a.csv, a.rodada)
-    else:
+    if a.banco:
         d0, ultima = ler_banco(engine_banco(), a.rodada)
+    else:
+        d0, ultima = ler_csv(a.csv, a.rodada)
     if ultima.empty:
         raise SystemExit("Rodada sem dados.")
 
