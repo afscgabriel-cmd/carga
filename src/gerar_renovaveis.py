@@ -1,0 +1,169 @@
+# -*- coding: utf-8 -*-
+"""Estende as previsões de renováveis do DESSEM (UTE, PCH, CGH, UHE, MGD) além do
+último dia coberto, usando a regra validada por backtest:
+
+    curva(dia) = nível do último dia do DESSEM  x  perfil intradiário médio dos últimos 28 dias
+
+Nível   = média das 48 meias-horas do último dia previsto pela rodada mais recente.
+Perfil  = média, sobre os últimos 28 dias de D+0, da curva normalizada (MW / média do dia).
+Sem separação por dia da semana nem correção sazonal (o backtest mostrou que pioram).
+
+Saída: CSV longo no mesmo padrão das bases de carga/eólica:
+    rodada_dia, valido_para_dia, valido_para, valido_para_hora, previsao_mw,
+    cd_subsistema, mnemonico_subsistema, nome_subsistema, tipo_fonte_energia, origem
+origem = "DESSEM" para os dias que a rodada cobre, "PERFIL" para os estendidos.
+
+Uso:
+    python src/gerar_renovaveis.py                      # lê o banco (database_config.json)
+    python src/gerar_renovaveis.py --horizonte 10
+    python src/gerar_renovaveis.py --csv data/renov_30min_2025.zip --rodada 2026-09-25   # teste sem banco
+"""
+import argparse
+import json
+import zipfile
+from pathlib import Path
+from urllib.parse import quote_plus
+
+import numpy as np
+import pandas as pd
+
+CONFIG_PATH = Path(r"C:\Users\afons\OneDrive - Central Energia\ATUALIZAR\database_config.json")
+OUTPUT_DIR = Path("output/renovaveis")
+
+FONTES = ["UTE", "PCH", "CGH", "UHE", "MGD"]
+DIAS_PERFIL = 28
+SUBSISTEMAS = {"SE": (1, "Sudeste"), "S": (2, "Sul"), "NE": (3, "Nordeste"), "N": (4, "Norte")}
+
+
+# ------------------------------------------------------------------ leitura
+def engine_banco():
+    from sqlalchemy import create_engine
+    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return create_engine(
+        f"postgresql+psycopg2://{quote_plus(cfg['POSTGRES_USERNAME'])}:{quote_plus(cfg['POSTGRES_PASSWORD'])}@"
+        f"{cfg['postgres_host']}:{cfg['postgres_port']}/{cfg['postgres_database']}"
+    )
+
+
+def ler_banco(engine, rodada=None):
+    """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa."""
+    from sqlalchemy import text
+    with engine.connect() as con:
+        if rodada is None:
+            rodada = pd.Timestamp(con.execute(text("SELECT MAX(rodada_dia) FROM fac_ons_renovaveis")).scalar())
+        rodada = pd.Timestamp(rodada)
+        ini = (rodada - pd.Timedelta(days=DIAS_PERFIL + 7)).date()
+        d0 = pd.read_sql(text("""
+            WITH ur AS (SELECT rodada_dia, tipo_fonte_energia, submercado, MAX(rev) rev
+                        FROM fac_ons_renovaveis WHERE rodada_dia BETWEEN :ini AND :rod GROUP BY 1,2,3)
+            SELECT r.rodada_dia, r.valido_para, r.tipo_fonte_energia, r.submercado, SUM(r.previsao) previsao
+            FROM fac_ons_renovaveis r JOIN ur USING (rodada_dia, tipo_fonte_energia, submercado, rev)
+            WHERE r.valido_para_dia = r.rodada_dia AND r.rodada_dia BETWEEN :ini AND :rod
+            GROUP BY 1,2,3,4"""), con, params={"ini": ini, "rod": rodada.date()})
+        ultima = pd.read_sql(text("""
+            WITH ur AS (SELECT tipo_fonte_energia, submercado, MAX(rev) rev
+                        FROM fac_ons_renovaveis WHERE rodada_dia = :rod GROUP BY 1,2)
+            SELECT r.rodada_dia, r.valido_para, r.tipo_fonte_energia, r.submercado, SUM(r.previsao) previsao
+            FROM fac_ons_renovaveis r JOIN ur USING (tipo_fonte_energia, submercado, rev)
+            WHERE r.rodada_dia = :rod GROUP BY 1,2,3,4"""), con, params={"rod": rodada.date()})
+    return _tipar(d0), _tipar(ultima)
+
+
+def ler_csv(caminho, rodada):
+    """Modo de teste: usa o extrato de 30 min (só D+0) e finge que a rodada cobre apenas o próprio dia."""
+    z = zipfile.ZipFile(caminho)
+    d = pd.read_csv(z.open(z.namelist()[0]), sep=";", decimal=",")
+    d = _tipar(d)
+    rodada = pd.Timestamp(rodada)
+    d0 = d[(d.rodada_dia > rodada - pd.Timedelta(days=DIAS_PERFIL + 7)) & (d.rodada_dia <= rodada)]
+    return d0, d0[d0.rodada_dia == rodada]
+
+
+def _tipar(d):
+    d = d[d.tipo_fonte_energia.isin(FONTES)].copy()
+    d["rodada_dia"] = pd.to_datetime(d.rodada_dia)
+    d["valido_para"] = pd.to_datetime(d.valido_para)
+    d["previsao"] = pd.to_numeric(d.previsao, errors="coerce")
+    return d
+
+
+# ------------------------------------------------------------------ regra
+def perfil_intradiario(d0: pd.DataFrame) -> pd.DataFrame:
+    """Perfil normalizado (48 slots) por fonte e submercado, média dos últimos DIAS_PERFIL dias."""
+    d = d0.copy()
+    d["slot"] = ((d.valido_para - d.rodada_dia).dt.total_seconds() // 1800).astype(int)
+    m = d.pivot_table(index=["tipo_fonte_energia", "submercado", "rodada_dia"], columns="slot", values="previsao")
+    m = m.groupby(level=[0, 1], group_keys=False).apply(lambda x: x.sort_index().tail(DIAS_PERFIL))
+    norm = m.div(m.mean(axis=1).replace(0, np.nan), axis=0)
+    perfil = norm.groupby(level=[0, 1]).mean().fillna(1.0)
+    return perfil.reindex(columns=range(48)).interpolate(axis=1, limit_direction="both")
+
+
+def estender(ultima: pd.DataFrame, perfil: pd.DataFrame, horizonte: int) -> pd.DataFrame:
+    """Gera as curvas de 30 min para os dias após o último coberto pela rodada."""
+    rodada = ultima.rodada_dia.iloc[0]
+    ultimo_dia = ultima.valido_para.dt.normalize().max()
+    base = ultima[ultima.valido_para.dt.normalize() == ultimo_dia]
+    nivel = base.groupby(["tipo_fonte_energia", "submercado"]).previsao.mean()
+    dias = pd.date_range(ultimo_dia + pd.Timedelta(days=1), rodada + pd.Timedelta(days=horizonte))
+    linhas = []
+    for (f, s), n in nivel.items():
+        p = perfil.loc[(f, s)].values if (f, s) in perfil.index else np.ones(48)
+        for dia in dias:
+            linhas.append(pd.DataFrame({
+                "rodada_dia": rodada, "valido_para": dia + pd.to_timedelta(np.arange(48) * 30, unit="min"),
+                "tipo_fonte_energia": f, "submercado": s, "previsao": n * p, "origem": "PERFIL"}))
+    ext = pd.concat(linhas, ignore_index=True) if linhas else pd.DataFrame()
+    dessem = ultima.assign(origem="DESSEM")
+    return pd.concat([dessem, ext], ignore_index=True)
+
+
+def formatar(df: pd.DataFrame) -> pd.DataFrame:
+    """Padrão das bases de carga/eólica."""
+    out = pd.DataFrame({
+        "rodada_dia": df.rodada_dia.dt.strftime("%Y-%m-%d"),
+        "valido_para_dia": df.valido_para.dt.strftime("%Y-%m-%d"),
+        "valido_para": df.valido_para.dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "valido_para_hora": df.valido_para.dt.strftime("%H:%M:%S"),
+        "previsao_mw": df.previsao.round(3),
+        "cd_subsistema": df.submercado.map(lambda s: SUBSISTEMAS[s][0]),
+        "mnemonico_subsistema": df.submercado,
+        "nome_subsistema": df.submercado.map(lambda s: SUBSISTEMAS[s][1]),
+        "tipo_fonte_energia": df.tipo_fonte_energia,
+        "origem": df.origem,
+    })
+    return out.sort_values(["tipo_fonte_energia", "mnemonico_subsistema", "valido_para"]).reset_index(drop=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--horizonte", type=int, default=10, help="dias após a rodada a cobrir (padrão 10, como o deck solar)")
+    ap.add_argument("--rodada", help="data da rodada (padrão: a mais recente do banco)")
+    ap.add_argument("--csv", help="modo de teste: extrato de 30 min em vez do banco")
+    a = ap.parse_args()
+
+    if a.csv:
+        d0, ultima = ler_csv(a.csv, a.rodada)
+    else:
+        d0, ultima = ler_banco(engine_banco(), a.rodada)
+    if ultima.empty:
+        raise SystemExit("Rodada sem dados.")
+
+    perfil = perfil_intradiario(d0)
+    res = formatar(estender(ultima, perfil, a.horizonte))
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    rod = res.rodada_dia.iloc[0].replace("-", "")
+    arq = OUTPUT_DIR / f"prev_renovaveis_estendida_{rod}.csv"
+    res.to_csv(arq, sep=";", decimal=",", index=False, encoding="utf-8-sig")
+
+    resumo = res.assign(valido_para_dia=res.valido_para_dia).groupby(["valido_para_dia", "origem", "tipo_fonte_energia"]).previsao_mw.mean().unstack().round(0)
+    print(f"Rodada {res.rodada_dia.iloc[0]} | dias DESSEM: {res[res.origem=='DESSEM'].valido_para_dia.nunique()} | "
+          f"dias PERFIL: {res[res.origem=='PERFIL'].valido_para_dia.nunique()} | perfil com {d0.rodada_dia.nunique()} dias de histórico")
+    print("\nMédia diária SIN (MW) — soma dos submercados:")
+    print((resumo * 4).to_string() if False else res.groupby(["valido_para_dia", "origem", "tipo_fonte_energia"]).previsao_mw.sum().div(48).unstack().round(0).to_string())
+    print(f"\nArquivo: {arq}")
+
+
+if __name__ == "__main__":
+    main()
