@@ -13,11 +13,10 @@ Saída: CSV longo no mesmo padrão das bases de carga/eólica:
     cd_subsistema, mnemonico_subsistema, nome_subsistema, tipo_fonte_energia, origem
 origem = "DESSEM" para os dias que a rodada cobre, "PERFIL" para os estendidos.
 
-Uso (padrão: lê o prev_renovaveis_dessem.csv mantido pelo atualizar_renovaveis_dessem.py):
+Uso (lê o banco via database_config.json):
     python gerar_renovaveis.py
     python gerar_renovaveis.py --horizonte 10
-    python gerar_renovaveis.py --csv "C:\\caminho\\prev_renovaveis_dessem.csv"
-    python gerar_renovaveis.py --banco          # consulta o banco em vez do CSV
+    python gerar_renovaveis.py --csv "C:\\caminho\\prev_renovaveis_dessem.csv"   # alternativa sem banco
 """
 import argparse
 import json
@@ -51,33 +50,36 @@ def engine_banco():
 def ler_banco(engine, rodada=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
-    Filtra por valido_para_dia (padrão das consultas da equipe, que usa o índice da tabela),
-    e não por rodada_dia, que força varredura completa. A rodada é filtrada depois, no pandas.
+    Mesma consulta do atualizar_renovaveis_dessem.py (faixa de rodada_dia em lotes de 7 dias),
+    com limite de tempo por consulta para nunca ficar pendurado indefinidamente.
     """
     from sqlalchemy import text
     t0 = time.time()
     fim = pd.Timestamp(rodada) if rodada else pd.Timestamp.today().normalize()
     ini = fim - pd.Timedelta(days=DIAS_PERFIL + 7)
-    print(f"Conectando ao banco e lendo valido_para_dia de {ini.date()} a {(fim + pd.Timedelta(days=10)).date()}...", flush=True)
+    sql = text("""
+        SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
+               SUM(previsao) AS previsao
+        FROM fac_ons_renovaveis
+        WHERE rodada_dia >= :ini AND rodada_dia < :fim
+        GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia
+    """)
+    print("Conectando ao banco...", flush=True)
     with engine.connect() as con:
-        d = pd.read_sql(text("""
-            SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
-                   SUM(previsao) AS previsao
-            FROM fac_ons_renovaveis
-            WHERE valido_para_dia >= :ini AND valido_para_dia <= :fim
-            GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia
-            ORDER BY valido_para_dia DESC
-        """), con, params={"ini": ini.date(), "fim": (fim + pd.Timedelta(days=10)).date()})
-    print(f"  {len(d):,} linhas em {time.time()-t0:.0f}s", flush=True)
-    d = _tipar(d)
-    d = d[(d.rodada_dia >= ini) & (d.rodada_dia <= fim)]
+        con.execute(text("SET statement_timeout = '900s'"))
+        print(f"Lendo rodadas de {ini.date()} a {fim.date()} em lotes de 7 dias...", flush=True)
+        partes = []
+        for a in pd.date_range(ini, fim, freq="7D"):
+            b = min(a + pd.Timedelta(days=7), fim + pd.Timedelta(days=1))
+            partes.append(pd.read_sql(sql, con, params={"ini": a.date(), "fim": b.date()}))
+            print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas ({time.time()-t0:.0f}s)", flush=True)
+    d = _tipar(pd.concat(partes, ignore_index=True))
     if d.empty:
         raise SystemExit("Nenhuma rodada nesse período.")
     rodada = d.rodada_dia.max()
     print(f"  rodada mais recente: {rodada.date()}", flush=True)
     d0 = d[pd.to_datetime(d.valido_para_dia) == d.rodada_dia]
-    ultima = d[d.rodada_dia == rodada]
-    return d0, ultima
+    return d0, d[d.rodada_dia == rodada]
 
 
 def ler_csv(caminho, rodada=None):
@@ -165,14 +167,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--horizonte", type=int, default=10, help="dias após a rodada a cobrir (padrão 10, como o deck solar)")
     ap.add_argument("--rodada", help="data-limite da rodada (padrão: hoje; usa a mais recente até essa data)")
-    ap.add_argument("--csv", default=str(CSV_DESSEM), help="CSV do atualizar_renovaveis_dessem.py (padrão) ou extrato zip")
-    ap.add_argument("--banco", action="store_true", help="consultar o banco em vez do CSV")
+    ap.add_argument("--csv", help="em vez do banco: prev_renovaveis_dessem.csv ou extrato zip (teste)")
     a = ap.parse_args()
 
-    if a.banco:
-        d0, ultima = ler_banco(engine_banco(), a.rodada)
-    else:
+    if a.csv:
         d0, ultima = ler_csv(a.csv, a.rodada)
+    else:
+        d0, ultima = ler_banco(engine_banco(), a.rodada)
     if ultima.empty:
         raise SystemExit("Rodada sem dados.")
 
