@@ -73,7 +73,8 @@ def ler_banco(engine, rodada=None):
             b = min(a + pd.Timedelta(days=7), fim + pd.Timedelta(days=1))
             partes.append(pd.read_sql(sql, con, params={"ini": a.date(), "fim": b.date()}))
             print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas ({time.time()-t0:.0f}s)", flush=True)
-    d = _tipar(pd.concat(partes, ignore_index=True))
+    partes = [x for x in partes if not x.empty]
+    d = _tipar(pd.concat(partes, ignore_index=True)) if partes else pd.DataFrame(columns=["rodada_dia","valido_para_dia","valido_para","submercado","tipo_fonte_energia","previsao"])
     if d.empty:
         raise SystemExit("Nenhuma rodada nesse período.")
     rodada = d.rodada_dia.max()
@@ -130,7 +131,14 @@ def perfil_intradiario(d0: pd.DataFrame) -> pd.DataFrame:
 def estender(ultima: pd.DataFrame, perfil: pd.DataFrame, horizonte: int) -> pd.DataFrame:
     """Gera as curvas de 30 min para os dias após o último coberto pela rodada."""
     rodada = ultima.rodada_dia.iloc[0]
-    ultimo_dia = ultima.valido_para.dt.normalize().max()
+    # descarta dias parciais (o DESSEM termina às 00:00 do dia seguinte, que fica com 1 só ponto)
+    dia = ultima.valido_para.dt.normalize()
+    pontos = ultima.groupby(dia).valido_para.nunique()
+    completos = pontos[pontos >= 40].index
+    if len(completos) < len(pontos):
+        print(f"  dias parciais descartados do DESSEM: {[d.date().isoformat() for d in pontos.index.difference(completos)]}", flush=True)
+    ultima = ultima[dia.isin(completos)]
+    ultimo_dia = completos.max()
     base = ultima[ultima.valido_para.dt.normalize() == ultimo_dia]
     nivel = base.groupby(["tipo_fonte_energia", "submercado"]).previsao.mean()
     dias = pd.date_range(ultimo_dia + pd.Timedelta(days=1), rodada + pd.Timedelta(days=horizonte))
