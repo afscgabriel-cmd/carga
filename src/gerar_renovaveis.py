@@ -47,32 +47,39 @@ def engine_banco():
 
 
 def ler_banco(engine, rodada=None):
-    """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa."""
+    """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
+
+    Consultas no mesmo formato do atualizar_renovaveis_dessem.py (filtro simples por
+    rodada_dia, agregação por rev); a rev máxima é escolhida no pandas.
+    """
     from sqlalchemy import text
     t0 = time.time()
     print("Conectando ao banco...", flush=True)
+    sql = text("""
+        SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia, rev,
+               SUM(previsao) AS previsao
+        FROM fac_ons_renovaveis
+        WHERE rodada_dia >= :ini AND rodada_dia < :fim
+        GROUP BY rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia, rev
+    """)
     with engine.connect() as con:
         if rodada is None:
-            rodada = pd.Timestamp(con.execute(text("SELECT MAX(rodada_dia) FROM fac_ons_renovaveis")).scalar())
+            rodada = con.execute(text("SELECT MAX(rodada_dia) FROM fac_ons_renovaveis")).scalar()
         rodada = pd.Timestamp(rodada)
-        ini = (rodada - pd.Timedelta(days=DIAS_PERFIL + 7)).date()
-        print(f"Rodada mais recente: {rodada.date()}. Lendo histórico D+0 desde {ini}...", flush=True)
-        d0 = pd.read_sql(text("""
-            WITH ur AS (SELECT rodada_dia, tipo_fonte_energia, submercado, MAX(rev) rev
-                        FROM fac_ons_renovaveis WHERE rodada_dia BETWEEN :ini AND :rod GROUP BY 1,2,3)
-            SELECT r.rodada_dia, r.valido_para, r.tipo_fonte_energia, r.submercado, SUM(r.previsao) previsao
-            FROM fac_ons_renovaveis r JOIN ur USING (rodada_dia, tipo_fonte_energia, submercado, rev)
-            WHERE r.valido_para_dia = r.rodada_dia AND r.rodada_dia BETWEEN :ini AND :rod
-            GROUP BY 1,2,3,4"""), con, params={"ini": ini, "rod": rodada.date()})
-        print(f"  {len(d0):,} linhas em {time.time()-t0:.0f}s. Lendo a rodada completa...", flush=True)
-        ultima = pd.read_sql(text("""
-            WITH ur AS (SELECT tipo_fonte_energia, submercado, MAX(rev) rev
-                        FROM fac_ons_renovaveis WHERE rodada_dia = :rod GROUP BY 1,2)
-            SELECT r.rodada_dia, r.valido_para, r.tipo_fonte_energia, r.submercado, SUM(r.previsao) previsao
-            FROM fac_ons_renovaveis r JOIN ur USING (tipo_fonte_energia, submercado, rev)
-            WHERE r.rodada_dia = :rod GROUP BY 1,2,3,4"""), con, params={"rod": rodada.date()})
-        print(f"  {len(ultima):,} linhas em {time.time()-t0:.0f}s.", flush=True)
-    return _tipar(d0), _tipar(ultima)
+        ini = rodada - pd.Timedelta(days=DIAS_PERFIL + 7)
+        print(f"Rodada mais recente: {rodada.date()}. Lendo de {ini.date()} a {rodada.date()}...", flush=True)
+        partes = []
+        for a in pd.date_range(ini, rodada, freq="7D"):
+            b = min(a + pd.Timedelta(days=7), rodada + pd.Timedelta(days=1))
+            partes.append(pd.read_sql(sql, con, params={"ini": a.date(), "fim": b.date()}))
+            print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas ({time.time()-t0:.0f}s)", flush=True)
+    d = _tipar(pd.concat(partes, ignore_index=True))
+    # rev máxima por rodada/fonte/submercado
+    mx = d.groupby(["rodada_dia", "tipo_fonte_energia", "submercado"]).rev.transform("max")
+    d = d[d.rev == mx].drop(columns="rev")
+    d0 = d[pd.to_datetime(d.valido_para_dia) == d.rodada_dia]
+    ultima = d[d.rodada_dia == rodada]
+    return d0, ultima
 
 
 def ler_csv(caminho, rodada):
