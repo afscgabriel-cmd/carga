@@ -47,7 +47,7 @@ def engine_banco():
     )
 
 
-def ler_banco(engine, rodada=None, dias=None):
+def ler_banco(engine, rodada=None, dias=None, completo=False):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
     Mesma consulta do atualizar_renovaveis_dessem.py (faixa de rodada_dia em lotes de 7 dias),
@@ -80,6 +80,8 @@ def ler_banco(engine, rodada=None, dias=None):
     rodada = d.rodada_dia.max()
     print(f"  rodada mais recente: {rodada.date()}", flush=True)
     d0 = d[pd.to_datetime(d.valido_para_dia) == d.rodada_dia]
+    if completo:
+        return d0, d[d.rodada_dia == rodada], d
     return d0, d[d.rodada_dia == rodada]
 
 

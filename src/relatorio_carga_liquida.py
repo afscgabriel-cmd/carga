@@ -79,12 +79,25 @@ def eolica_d0(engine, ini, csv=None):
     return s
 
 
-def renovaveis_d0(engine, dias, csv=None):
+def renovaveis_passado(engine, dias, csv=None):
+    """Para cada dia passado: o D+0 da rodada daquele dia; se não existir (rodada ainda não carregada),
+    a previsão da rodada mais recente anterior ao dia (D+1, D+2...). Nenhum dia fica sem valor."""
     if csv:
         d0, _ = gr.ler_csv(csv)
+        d = d0
     else:
-        d0, _ = gr.ler_banco(engine, dias=dias)
-    s = d0.rename(columns={"tipo_fonte_energia": "componente", "submercado": "subsistema", "previsao": "mw"})
+        _, _, d = gr.ler_banco(engine, dias=dias, completo=True)
+    d = d.copy()
+    d["dia"] = d.valido_para.dt.normalize()
+    d = d[d.rodada_dia <= d.dia]
+    melhor = d.groupby(["dia", "tipo_fonte_energia", "submercado"]).rodada_dia.transform("max")
+    d = d[d.rodada_dia == melhor]
+    usados = d.groupby("dia").rodada_dia.max()
+    atras = usados[usados < usados.index]
+    if len(atras):
+        print(f"renováveis: {len(atras)} dia(s) sem D+0 preenchidos com a rodada anterior: "
+              f"{ {k.date().isoformat(): v.date().isoformat() for k, v in atras.items()} }", flush=True)
+    s = d.rename(columns={"tipo_fonte_energia": "componente", "submercado": "subsistema", "previsao": "mw"})
     return s[["valido_para", "subsistema", "componente", "mw"]]
 
 
@@ -197,7 +210,7 @@ def main():
     fim_pass = rod - pd.Timedelta(days=1)
     print("lendo passado...", flush=True)
     c0 = carga_d0(eng, ini, a.carga_csv)
-    r0 = renovaveis_d0(eng, (fim_pass - ini).days + 2, a.renov_csv)
+    r0 = renovaveis_passado(eng, (fim_pass - ini).days + 2, a.renov_csv)
     if a.passado == "realizado":
         s0 = realizado_30min(eng, "fac_ons_geracao_solar", "solar", ini, fim_pass, a.realizado_csv)
         e0 = realizado_30min(eng, "fac_ons_geracao_eolica", "eolica", ini, fim_pass, a.realizado_eolica_csv)
