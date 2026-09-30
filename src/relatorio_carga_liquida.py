@@ -158,10 +158,15 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     if not pas.empty:   # emenda: a previsão começa no último ponto do passado
         prv = pd.concat([pas.tail(1), prv])
     fig, ax = plt.subplots(figsize=(16, 6))
-    ax.plot(pas.index, pas.values, color="#1f77b4", lw=2, marker="o", ms=6, label="Realizado")
-    ax.plot(prv.index, prv.values, color="#d62728", lw=2, ls="--", marker="o", ms=6, label="Previsao")
-    ini_prev = pas.index.max() if not pas.empty else prv.index.min()
-    ax.axvspan(ini_prev, prv.index.max(), color="#d62728", alpha=.07)
+    # previsão: linha tracejada emendada no último realizado, mas marcadores só nos dias previstos
+    ax.plot(prv.index, prv.values, color="#d62728", lw=2, ls="--", zorder=2)
+    so_prev = prv.iloc[1:] if not pas.empty else prv
+    ax.plot(so_prev.index, so_prev.values, color="#d62728", lw=0, marker="o", ms=6, zorder=3)
+    ax.plot([], [], color="#d62728", lw=2, ls="--", marker="o", ms=6, label="Previsao")
+    ax.plot(pas.index, pas.values, color="#1f77b4", lw=2, marker="o", ms=6, label="Realizado", zorder=4)
+    # sombra e divisória entre o último realizado e o primeiro previsto
+    ini_prev = (pas.index.max() + pd.Timedelta(hours=12)) if not pas.empty else prv.index.min()
+    ax.axvspan(ini_prev, prv.index.max() + pd.Timedelta(hours=12), color="#d62728", alpha=.07)
     ax.axvline(ini_prev, color="gray", lw=1, ls=":")
     # rótulos fora da linha: acima quando o ponto está no alto em relação aos vizinhos, abaixo quando está no vale
     serie = pd.concat([pas, prv.iloc[1:]])
@@ -169,14 +174,16 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     for i, (d, v) in enumerate(serie.items()):
         viz = [vals[j] for j in (i - 1, i + 1) if 0 <= j < len(vals)]
         acima = v >= sum(viz) / len(viz)
-        cor = "#1f77b4" if d <= ini_prev else "#d62728"
+        cor = "#1f77b4" if d < ini_prev else "#d62728"
         ax.annotate(f"{v:.1f}".replace(".", ","), (d, v), textcoords="offset points", xytext=(0, 10 if acima else -16),
                     ha="center", fontsize=8.5, color=cor)
     ax.set_ylabel("GW"); ax.grid(alpha=.25)
     ax.set_title(titulo, loc="left", fontsize=13, pad=12)
     fig.text(0.99, 0.965, f"Rodada de {rod.strftime('%d/%m/%Y')}", ha="right", fontsize=11, color="#555")
     fig.text(0.01, 0.01, f"Fonte: {fonte}", ha="left", fontsize=9.5, color="#555")
-    ax.legend(loc="upper left", frameon=True)
+    h, l = ax.get_legend_handles_labels()
+    ordem = [l.index("Realizado"), l.index("Previsao")] if "Realizado" in l else range(len(l))
+    ax.legend([h[i] for i in ordem], [l[i] for i in ordem], loc="upper left", frameon=True)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
     fig.savefig(arq, dpi=120); plt.close(fig)
