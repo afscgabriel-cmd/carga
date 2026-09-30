@@ -152,3 +152,58 @@ Em MW médios: UTE ~160, PCH ~150, CGH ~18, UHE ~56, MGD ~525 (SIN).
 - Correção sazonal da UTE só vale a pena para horizontes acima de duas semanas; se esse
   horizonte passar a ser necessário, aplicar apenas nas viradas de safra.
 - Reexecutar os backtests a cada semestre, pois o parque cresce (MGD) e a hidrologia muda.
+
+---
+
+# Anexo: validação da previsão solar oficial (deck ONS) contra o realizado
+
+Script: `src/validar_solar.py`. Período: setembro/2026, 30 decks diários, realizado horário de
+`fac_ons_geracao_solar` (subsistema, dia, hora, MW).
+
+## Resultado (SIN, horas com realizado > 100 MW)
+
+| Antecedência | MAE (MW) | Viés (MW) | MAPE |
+|---|---|---|---|
+| D+0 | 4.578 | +1.023 | 44,5 % |
+| D+1 | 4.157 | +1.518 | 42,7 % |
+| D+3 a D+9 | 3.055 a 3.239 | +2.264 a +2.770 | 35 a 38 % |
+
+Por hora do dia (SIN, D+1): razão realizado/previsto ≈ 1,0 às 6h e das 15h às 17h; **0,74 a 0,79
+das 8h às 12h**, com o realizado travado em ~12 GW enquanto a previsão chega a 16 GW.
+Teste de deslocamento de hora: mínimo do MAE em 0 h, ou seja, não há desalinhamento temporal.
+
+## Interpretação
+
+O erro não diminui com a antecedência, tem o mesmo sinal todos os dias e concentra-se no meio do
+dia, com o realizado formando um platô. Isso não é erro meteorológico: é **constrained-off**.
+
+Conforme a NT-ONS DPL 0031/2024 (Modelo de Estimação das Funções de Produtividade Fotovoltaica
+para Estimação de Energia Frustrada): o ONS comanda reduções de geração fotovoltaica por
+congestionamento da transmissão; a geração esperada é estimada por funções de produtividade
+(irradiância → potência); a **energia frustrada** é a diferença entre essa expectativa e a geração
+verificada durante a restrição. A "potência disponível" informada pelos agentes não incorpora os
+cortes do ONS.
+
+Logo, o deck de previsão representa a geração **disponível** e o realizado a geração **injetada**;
+a diferença observada é energia frustrada mais o erro meteorológico, sendo este último pequeno
+(MAE de 0,3 a 2 GW nas horas sem corte).
+
+## Decisão vigente
+
+A carga líquida usa o deck **sem correção de corte**, isto é, representa
+"carga − geração renovável disponível". Nos dias de corte, a carga líquida efetiva ao meio-dia é
+maior que a calculada (≈ 4 GW em setembro/2026). Às 17h-18h, horário da ponta da carga líquida,
+a diferença é desprezível.
+
+Caso se deseje a carga líquida com a solar **injetada**, as alternativas são: (a) fator por hora do
+dia = mediana da razão realizado/previsto dos últimos N dias, aplicado ao deck; (b) a série de
+constrained-off fotovoltaico dos Dados Abertos do ONS (por usina e hora, com geração de
+referência, verificada e frustrada), que permite prever o corte de forma estrutural. O mesmo
+raciocínio vale para a eólica, cujo corte no NE é ainda maior.
+
+## Passado nos relatórios
+
+`relatorio_carga_liquida.py` usa por padrão, no passado, o D+0 de cada rodada (mesma base da
+previsão, sem corte), para não criar degrau na fronteira com a previsão. A opção
+`--passado realizado` usa `fac_ons_geracao_solar` e `fac_ons_geracao_eolica`. Não há tabela de
+carga realizada no banco; o passado da carga é sempre D+0.
