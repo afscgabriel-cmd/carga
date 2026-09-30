@@ -49,10 +49,12 @@ def ler_realizado(engine=None, csv=None, ini=None, fim=None):
 
 def previsoes_horarias(pasta: Path) -> pd.DataFrame:
     linhas = []
+    vistos = set()
     for z in sorted(pasta.glob("Deck_Previsao_*.zip")):
         m = re.search(r"Deck_Previsao_(\d{8})", z.name)
-        if not m:
+        if not m or m[1] in vistos:      # ignora cópias tipo "Deck_Previsao_20260912 (1).zip"
             continue
+        vistos.add(m[1])
         deck = pd.to_datetime(m[1], format="%Y%m%d")
         meia = so.somar_meia_hora(so.ler_previsoes(z))
         hor = meia.resample("h").mean()
@@ -95,7 +97,7 @@ def main():
 
     def tab(g):
         return pd.DataFrame({"MAE_MW": g.erro.apply(lambda e: e.abs().mean()), "vies_MW": g.erro.mean(),
-                             "MAPE_%": g.apply(lambda x: 100 * x.erro.abs().mean() / x.mw.mean()), "n_horas": g.size()}).round(1)
+                             "MAPE_%": 100 * g.erro.apply(lambda e: e.abs().mean()) / g.mw.mean(), "n_horas": g.size()}).round(1)
 
     por_ant = tab(dia.groupby(["subsistema", "antecedencia"])).reset_index()
     por_hora = tab(c.groupby(["subsistema", "hora"])).reset_index()
@@ -107,6 +109,33 @@ def main():
     print(por_ant.pivot(index="antecedencia", columns="subsistema", values=["MAE_MW", "vies_MW", "MAPE_%"]).round(1).to_string())
     print("\n=== Erro por hora do dia, SIN ===")
     print(por_hora[por_hora.subsistema == "SIN"].drop(columns="subsistema").to_string(index=False))
+
+    # --- diagnóstico 1: deslocamento de hora (qual alinhamento minimiza o MAE, SIN, D+1) ---
+    print("\n=== Teste de deslocamento (SIN, D+1): MAE com a previsão deslocada de k horas ===")
+    base = prev[(prev.subsistema == "SIN") & (prev.antecedencia == 1)][["valido_para", "prev"]]
+    rs = real[real.subsistema == "SIN"][["valido_para", "mw"]]
+    for k in [-2, -1, 0, 1, 2]:
+        b = base.copy(); b["valido_para"] = b.valido_para + pd.Timedelta(hours=k)
+        m = b.merge(rs, on="valido_para"); m = m[m.mw > 100]
+        print(f"  prev deslocada {k:+d} h: MAE = {(m.prev - m.mw).abs().mean():8.0f} MW | viés = {(m.prev - m.mw).mean():+8.0f} MW")
+    print("  (se o menor MAE não for em 0, há desalinhamento de hora entre deck e realizado)")
+
+    # --- diagnóstico 2: perfil médio previsto x realizado por hora e razão real/prev ---
+    print("\n=== Perfil médio por hora (SIN, D+1): previsto, realizado e razão real/prev ===")
+    m = base.merge(rs, on="valido_para"); m["hora"] = m.valido_para.dt.hour
+    perfil = m.groupby("hora")[["prev", "mw"]].mean().round(0)
+    perfil["razao_real_prev"] = (perfil.mw / perfil.prev.replace(0, float("nan"))).round(2)
+    perfil = perfil[(perfil.prev > 100) | (perfil.mw > 100)]
+    print(perfil.to_string())
+    print("  razão ~1 de manhã/tarde e bem < 1 só no meio do dia = corte de geração (constrained-off);")
+    print("  razão < 1 o dia todo = diferença de parque (deck inclui usinas que o realizado não mede).")
+    perfil.to_csv(OUTPUT_DIR / "solar_perfil_prev_x_real.csv", sep=";", decimal=",", encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.plot(perfil.index, perfil.prev, marker="o", label="previsto D+1"); ax.plot(perfil.index, perfil.mw, marker="o", color="black", label="realizado")
+    ax.set_xticks(range(24)); ax.set_xlabel("hora"); ax.set_ylabel("MW"); ax.grid(alpha=.3); ax.legend()
+    ax.set_title("Solar SIN: perfil médio por hora, previsto x realizado (set/2026)"); fig.tight_layout()
+    fig.savefig(OUTPUT_DIR / "solar_perfil_hora.png", dpi=120); plt.close(fig)
 
     # gráficos
     fig, axs = plt.subplots(1, 3, figsize=(20, 4.5))
