@@ -49,6 +49,13 @@ def ler_realizado(engine=None, csv=None, ini=None, fim=None, tabela="fac_ons_ger
     d["valido_para"] = pd.to_datetime(d.dia.astype(str)) + pd.to_timedelta(d.hora.astype(str))
     d["mw"] = pd.to_numeric(d.carga, errors="coerce")
     d["subsistema"] = d.subsistema.astype(str).str.strip()
+    # valores implausíveis (ex.: 02 e 03/09/2026 na solar, com valores de carga do SIN): descartados
+    limite = 30000 if "solar" in tabela else 60000
+    ruim = d.mw > limite
+    if ruim.any():
+        dias = sorted(set(d.loc[ruim, "valido_para"].dt.date))
+        print(f"AVISO {tabela}: {int(ruim.sum())} valores acima de {limite} MW descartados (dias: {[str(x) for x in dias[:6]]})", flush=True)
+        d = d[~ruim]
     return d[["valido_para", "subsistema", "mw"]]
 
 
