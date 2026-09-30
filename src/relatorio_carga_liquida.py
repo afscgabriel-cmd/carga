@@ -11,10 +11,11 @@ Com --passado realizado, solar e eólica usam o realizado do ONS (fac_ons_geraca
 que inclui o corte de geração e por isso fica abaixo da previsão no meio do dia.
 Futuro: a previsão atual do carga_liquida.py.
 
-Saídas em output/relatorio/:
-    serie_diaria_<rodada>.csv          por dia e subsistema: média de cada variável, ponta e hora da ponta
-    relatorio_SIN_<rodada>.png         SIN: carga/carga líquida (média e ponta) + componentes
-    relatorio_subsistemas_<rodada>.png ponta e média da carga líquida por subsistema
+Saídas em output/relatorio/ (um PNG por variável, estilo padrão: azul = realizado/D+0, vermelho = previsão):
+    serie_diaria_<rodada>.csv          por dia e subsistema: média de cada variável, ponta, mínimo, hora da ponta
+    carga_liquida_ponta_<rodada>.png, carga_liquida_media_<rodada>.png, carga_liquida_min_<rodada>.png,
+    carga_media_, eolica_media_, solar_media_, MGD_media_, UTE_media_, hidro_pequenas_media_<rodada>.png
+    (com --subsistema SE/S/NE/N, o mesmo conjunto para o subsistema escolhido)
 
 Uso:
     python relatorio_carga_liquida.py                 # banco + decks
@@ -136,9 +137,37 @@ def serie_diaria(w: pd.DataFrame, origem: str) -> pd.DataFrame:
     return out.reset_index()
 
 
+def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq: Path):
+    """Um gráfico por variável: passado (azul, 'Realizado') e previsão (vermelho tracejado), em GW com rótulos."""
+    y = x[col] / 1000.0
+    pas = y[x.origem != "previsão"]
+    prv = y[x.origem == "previsão"]
+    if not pas.empty:   # emenda: a previsão começa no último ponto do passado
+        prv = pd.concat([pas.tail(1), prv])
+    fig, ax = plt.subplots(figsize=(16, 6))
+    ax.plot(pas.index, pas.values, color="#1f77b4", lw=2, marker="o", ms=6, label="Realizado")
+    ax.plot(prv.index, prv.values, color="#d62728", lw=2, ls="--", marker="o", ms=6, label="Previsao")
+    ini_prev = rod - pd.Timedelta(hours=12)
+    ax.axvspan(ini_prev, prv.index.max() + pd.Timedelta(hours=12), color="#d62728", alpha=.07)
+    ax.axvline(ini_prev, color="gray", lw=1, ls=":")
+    for i, (d, v) in enumerate(pd.concat([pas, prv.iloc[1:]]).items()):
+        cor = "#1f77b4" if d < rod else "#d62728"
+        ax.annotate(f"{v:.1f}".replace(".", ","), (d, v), textcoords="offset points", xytext=(0, 9 if i % 2 == 0 else -15),
+                    ha="center", fontsize=8.5, color=cor)
+    ax.set_ylabel("GW"); ax.grid(alpha=.25)
+    ax.set_title(titulo, loc="left", fontsize=13, pad=12)
+    fig.text(0.99, 0.965, f"Rodada de {rod.strftime('%d/%m/%Y')}", ha="right", fontsize=11, color="#555")
+    fig.text(0.01, 0.01, f"Fonte: {fonte}", ha="left", fontsize=9.5, color="#555")
+    ax.legend(loc="upper left", frameon=True)
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+    fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
+    fig.savefig(arq, dpi=120); plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dias", type=int, default=60, help="tamanho da janela (passado + previsão)")
+    ap.add_argument("--dias", type=int, default=30, help="tamanho da janela (passado + previsão)")
+    ap.add_argument("--subsistema", default="SIN", choices=["SIN", "SE", "S", "NE", "N"], help="qual subsistema desenhar")
     ap.add_argument("--horizonte", type=int, default=10)
     ap.add_argument("--deck"); ap.add_argument("--carga-csv"); ap.add_argument("--eolica-csv"); ap.add_argument("--renov-csv")
     ap.add_argument("--passado", choices=["d0", "realizado"], default="d0",
@@ -194,45 +223,24 @@ def main():
     tag = rod.strftime("%Y%m%d")
     sd.round(1).to_csv(OUTPUT_DIR / f"serie_diaria_{tag}.csv", sep=";", decimal=",", index=False, encoding="utf-8-sig")
 
-    # ---- gráfico SIN
-    x = sd[sd.subsistema == "SIN"].set_index("dia")
-    fig, axs = plt.subplots(3, 1, figsize=(16, 13), sharex=True, gridspec_kw={"height_ratios": [1.3, 1, 1]})
-    ax = axs[0]
-    ax.plot(x.index, x.carga_media, color="black", lw=1.8, label="Carga (média diária)")
-    ax.plot(x.index, x.carga_liquida_media, color="tab:red", lw=1.8, label="Carga líquida (média diária)")
-    ax.plot(x.index, x.carga_liquida_ponta, color="tab:red", lw=1.4, ls="--", marker="o", ms=3, label="Carga líquida (ponta do dia)")
-    ax.plot(x.index, x.carga_liquida_min, color="tab:red", lw=1, ls=":", label="Carga líquida (mínimo do dia)")
-    ax.set_ylabel("MW"); ax.set_title(f"SIN: carga e carga líquida, média e ponta diárias. Rodada {rod.date()}")
-    ax = axs[1]
-    for c, cor in [("eolica", "tab:blue"), ("solar", "goldenrod"), ("MGD", "orange"), ("UTE", "tab:green")]:
-        ax.plot(x.index, x[f"{c}_media"], lw=1.6, color=cor, label=c)
-    ax.plot(x.index, x.PCH_media + x.CGH_media + x.UHE_media, lw=1.6, color="tab:cyan", label="PCH+CGH+UHE")
-    ax.set_ylabel("MW médios"); ax.set_title("Componentes (média diária)")
-    ax = axs[2]
-    ax.bar(x.index, x.carga_liquida_ponta - x.carga_liquida_min, width=0.8, color="tab:purple", alpha=.6, label="ponta − mínimo da carga líquida")
-    ax.set_ylabel("MW"); ax.set_title("Amplitude diária da carga líquida (ponta − mínimo)")
-    for ax in axs:
-        ax.axvspan(rod - pd.Timedelta(hours=12), fim_prev + pd.Timedelta(hours=12), color="gray", alpha=.12)
-        ax.axvline(rod - pd.Timedelta(hours=12), color="gray", lw=1, ls="--")
-        ax.grid(alpha=.3); ax.legend(loc="upper left", fontsize=9, ncol=3)
-        ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
-    axs[0].annotate("previsão →", xy=(rod, axs[0].get_ylim()[1] * 0.97), fontsize=10, color="gray")
-    axs[0].annotate("← " + ("realizado (solar, eólica) / D+0" if a.passado == "realizado" else "D+0 de cada rodada"), xy=(rod - pd.Timedelta(days=1), axs[0].get_ylim()[1] * 0.97), fontsize=10, color="gray", ha="right")
-    fig.tight_layout(); fig.savefig(OUTPUT_DIR / f"relatorio_SIN_{tag}.png", dpi=120); plt.close(fig)
-
-    # ---- gráfico por subsistema
-    fig, axs = plt.subplots(2, 2, figsize=(16, 9), sharex=True)
-    for ax, sb in zip(axs.flat, ["SE", "S", "NE", "N"]):
-        y = sd[sd.subsistema == sb].set_index("dia")
-        ax.plot(y.index, y.carga_media, color="black", lw=1.4, label="carga média")
-        ax.plot(y.index, y.carga_liquida_media, color="tab:red", lw=1.4, label="carga líq. média")
-        ax.plot(y.index, y.carga_liquida_ponta, color="tab:red", lw=1.2, ls="--", label="carga líq. ponta")
-        ax.axvspan(rod - pd.Timedelta(hours=12), fim_prev + pd.Timedelta(hours=12), color="gray", alpha=.12)
-        ax.set_title(sb); ax.set_ylabel("MW"); ax.grid(alpha=.3)
-        ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
-    axs[0, 0].legend(fontsize=8)
-    fig.suptitle(f"Carga e carga líquida por subsistema (média e ponta diárias). Rodada {rod.date()}"); fig.tight_layout()
-    fig.savefig(OUTPUT_DIR / f"relatorio_subsistemas_{tag}.png", dpi=120); plt.close(fig)
+    # ---- gráficos enxutos: um por variável, estilo padrão da equipe
+    x = sd[sd.subsistema == a.subsistema].set_index("dia")
+    graficos = [
+        ("carga_liquida_ponta", "Carga liquida  -  ponta diaria (maximo)", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
+        ("carga_liquida_media", "Carga liquida  -  media diaria", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
+        ("carga_liquida_min", "Carga liquida  -  minimo diario", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
+        ("carga_media", "Carga  -  media diaria", "prev_carga_dessem"),
+        ("eolica_media", "Geracao eolica  -  media diaria", "TEMPO OK"),
+        ("solar_media", "Geracao solar (UFV)  -  media diaria", "deck de previsao ONS"),
+        ("MGD_media", "MMGD  -  media diaria", "DESSEM"),
+        ("UTE_media", "UTE biomassa  -  media diaria", "DESSEM"),
+        ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  media diaria", "DESSEM"),
+    ]
+    x["hidro_pequenas_media"] = x.PCH_media + x.CGH_media + x.UHE_media
+    sufixo = "" if a.subsistema == "SIN" else f"_{a.subsistema}"
+    for col, titulo, fonte in graficos:
+        grafico_enxuto(x, col, f"{titulo}  -  ultimos {a.dias} dias" + ("" if a.subsistema == "SIN" else f"  -  {a.subsistema}"),
+                       fonte, rod, OUTPUT_DIR / f"{col}{sufixo}_{tag}.png")
 
     print(f"\n{len(x)} dias na série SIN ({x.index.min().date()} a {x.index.max().date()}) em {time.time()-t0:.0f}s")
     print(x[["carga_media", "carga_liquida_media", "carga_liquida_ponta", "hora_ponta", "origem"]].tail(14).round(0).to_string())
