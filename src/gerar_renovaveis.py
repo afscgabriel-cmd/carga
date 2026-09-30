@@ -47,7 +47,7 @@ def engine_banco():
     )
 
 
-def ler_banco(engine, rodada=None):
+def ler_banco(engine, rodada=None, dias=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
     Mesma consulta do atualizar_renovaveis_dessem.py (faixa de rodada_dia em lotes de 7 dias),
@@ -56,7 +56,7 @@ def ler_banco(engine, rodada=None):
     from sqlalchemy import text
     t0 = time.time()
     fim = pd.Timestamp(rodada) if rodada else pd.Timestamp.today().normalize()
-    ini = fim - pd.Timedelta(days=DIAS_PERFIL + 7)
+    ini = fim - pd.Timedelta(days=dias or DIAS_PERFIL + 7)
     sql = text("""
         SELECT rodada_dia, valido_para_dia, valido_para, submercado, tipo_fonte_energia,
                SUM(previsao) AS previsao
