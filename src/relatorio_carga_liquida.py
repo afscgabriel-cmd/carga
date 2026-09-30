@@ -2,11 +2,11 @@
 """Relatório de apresentação: médias diárias e ponta da carga líquida numa janela de ~2 meses,
 com o passado (D+0 de cada rodada) e, no fim, a previsão atual.
 
-Passado (dias já ocorridos): previsão D+0 de cada rodada, por fonte
-    carga        fac_sintegre_prev_carga_dessem, dia = data da rodada
-    eólica       fac_tempook_geracao_eolica_hourly, valido_para_dia = rodada_dia
-    renováveis   fac_ons_renovaveis, valido_para_dia = rodada_dia
-    solar        D+0 dos decks em solar_ons.PASTA_DECKS; dias sem deck: realizado (fac_ons_geracao_solar)
+Passado (dias já ocorridos):
+    solar        REALIZADO: fac_ons_geracao_solar (horário -> repetido nas duas meias-horas)
+    eólica       REALIZADO: fac_ons_geracao_eolica (idem)
+    carga        D+0 de fac_sintegre_prev_carga_dessem (não há tabela de carga realizada)
+    renováveis   D+0 de fac_ons_renovaveis (idem)
 Futuro: a previsão atual do carga_liquida.py.
 
 Saídas em output/relatorio/:
@@ -17,7 +17,7 @@ Saídas em output/relatorio/:
 Uso:
     python relatorio_carga_liquida.py                 # banco + decks
     python relatorio_carga_liquida.py --dias 60
-    (opções --carga-csv/--eolica-csv/--renov-csv/--realizado-csv/--deck para teste sem banco)
+    (opções --carga-csv/--eolica-csv/--renov-csv/--realizado-csv/--realizado-eolica-csv/--deck para teste sem banco)
 """
 import argparse
 import sys
@@ -85,29 +85,16 @@ def renovaveis_d0(engine, dias, csv=None):
     return s[["valido_para", "subsistema", "componente", "mw"]]
 
 
-def solar_passado(engine, ini, fim, realizado_csv=None, pasta=None):
-    """D+0 dos decks disponíveis; nos dias sem deck, o realizado horário repetido nas duas meias-horas."""
-    pasta = pasta or so.PASTA_DECKS
-    partes, dias_deck = [], set()
-    for z in sorted(pasta.glob("Deck_Previsao_*.zip")):
-        m = so.re.search(r"Deck_Previsao_(\d{8})", z.name)
-        if not m:
-            continue
-        deck = pd.to_datetime(m[1], format="%Y%m%d")
-        if deck < ini or deck > fim or deck in dias_deck:
-            continue
-        meia = so.somar_meia_hora(so.ler_previsoes(z))
-        meia = meia[meia.index.normalize() == deck]
-        x = meia.drop(columns="SIN").stack().rename("mw").reset_index(); x.columns = ["valido_para", "subsistema", "mw"]
-        partes.append(x); dias_deck.add(deck)
-    real = vs.ler_realizado(engine, realizado_csv, ini.date(), fim.date())
-    real = real[~real.subsistema.eq("SIN") & ~real.valido_para.dt.normalize().isin(dias_deck)]
+def realizado_30min(engine, tabela, componente, ini, fim, csv=None):
+    """Realizado horário (subsistema, dia, hora, carga) repetido nas duas meias-horas, sem a linha SIN."""
+    real = vs.ler_realizado(engine, csv, ini.date(), fim.date(), tabela=tabela)
+    real = real[~real.subsistema.eq("SIN")]
     r2 = real.copy(); r2["valido_para"] += pd.Timedelta(minutes=30)
-    partes.append(pd.concat([real, r2])[["valido_para", "subsistema", "mw"]])
-    s = pd.concat(partes, ignore_index=True); s["componente"] = "solar"
-    dias_real = sorted(set(s.valido_para.dt.date) - {d.date() for d in dias_deck})
-    print(f"solar passado: {len(dias_deck)} dias com deck (D+0), {len(dias_real)} dias com realizado", flush=True)
-    return s, dias_deck
+    s = pd.concat([real, r2])[["valido_para", "subsistema", "mw"]]
+    s["componente"] = componente
+    print(f"{componente} realizado ({tabela}): {s.valido_para.min()} a {s.valido_para.max()}, "
+          f"média por subsistema (MW) {s.groupby('subsistema').mw.mean().round(0).to_dict()}", flush=True)
+    return s
 
 
 # ------------------------------------------------------------------ montagem
@@ -131,10 +118,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dias", type=int, default=60, help="tamanho da janela (passado + previsão)")
     ap.add_argument("--horizonte", type=int, default=10)
-    ap.add_argument("--deck"); ap.add_argument("--carga-csv"); ap.add_argument("--eolica-csv"); ap.add_argument("--renov-csv"); ap.add_argument("--realizado-csv")
+    ap.add_argument("--deck"); ap.add_argument("--carga-csv"); ap.add_argument("--eolica-csv"); ap.add_argument("--renov-csv")
+    ap.add_argument("--realizado-csv"); ap.add_argument("--realizado-eolica-csv")
     a = ap.parse_args()
     t0 = time.time()
-    offline = a.carga_csv and a.eolica_csv and a.renov_csv and a.realizado_csv
+    offline = a.carga_csv and a.eolica_csv and a.renov_csv and a.realizado_csv and a.realizado_eolica_csv
     eng = None if offline else gr.engine_banco()
 
     # ---- previsão atual (igual ao carga_liquida.py)
@@ -147,22 +135,20 @@ def main():
     ini = fim_prev - pd.Timedelta(days=a.dias)
     print(f"janela: {ini.date()} a {fim_prev.date()} | rodada {rod.date()}", flush=True)
 
-    # ---- passado: D+0 de cada rodada, até o dia anterior à rodada atual
+    # ---- passado: realizado (solar, eólica) e D+0 (carga, renováveis), até o dia anterior à rodada atual
     fim_pass = rod - pd.Timedelta(days=1)
-    print("lendo passado (D+0 de cada rodada)...", flush=True)
+    print("lendo passado...", flush=True)
     c0 = carga_d0(eng, ini, a.carga_csv)
-    e0 = eolica_d0(eng, ini, a.eolica_csv)
     r0 = renovaveis_d0(eng, (fim_pass - ini).days + 2, a.renov_csv)
-    s0, dias_deck = solar_passado(eng, ini, fim_pass, a.realizado_csv, Path(a.deck).parent if a.deck else None)
+    s0 = realizado_30min(eng, "fac_ons_geracao_solar", "solar", ini, fim_pass, a.realizado_csv)
+    e0 = realizado_30min(eng, "fac_ons_geracao_eolica", "eolica", ini, fim_pass, a.realizado_eolica_csv)
     pas = pd.concat([c0, e0, r0, s0]); pas = pas[(pas.valido_para >= ini) & (pas.valido_para < rod)]
     w_pas = cl.montar([pas]) if not pas.empty else None
 
     # ---- série diária
     partes = []
     if w_pas is not None and not w_pas.empty:
-        sp = serie_diaria(w_pas, "D+0")
-        sp.loc[~sp.dia.isin(dias_deck), "origem"] = "D+0 (solar realizada)"
-        partes.append(sp)
+        partes.append(serie_diaria(w_pas, "passado: solar/eólica realizadas, carga/renováveis D+0"))
     partes.append(serie_diaria(w_prev, "previsão"))
     sd = pd.concat(partes, ignore_index=True).sort_values(["subsistema", "dia"])
     sd = sd[sd.n_pontos >= 40]   # só dias completos
@@ -193,7 +179,7 @@ def main():
         ax.grid(alpha=.3); ax.legend(loc="upper left", fontsize=9, ncol=3)
         ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     axs[0].annotate("previsão →", xy=(rod, axs[0].get_ylim()[1] * 0.97), fontsize=10, color="gray")
-    axs[0].annotate("← D+0 de cada rodada", xy=(rod - pd.Timedelta(days=1), axs[0].get_ylim()[1] * 0.97), fontsize=10, color="gray", ha="right")
+    axs[0].annotate("← realizado (solar, eólica) / D+0 (carga, renováveis)", xy=(rod - pd.Timedelta(days=1), axs[0].get_ylim()[1] * 0.97), fontsize=10, color="gray", ha="right")
     fig.tight_layout(); fig.savefig(OUTPUT_DIR / f"relatorio_SIN_{tag}.png", dpi=120); plt.close(fig)
 
     # ---- gráfico por subsistema

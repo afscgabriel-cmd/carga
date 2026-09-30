@@ -32,15 +32,20 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "validacao_solar"
 REGIOES = ["NE", "SE", "SIN"]
 
 
-def ler_realizado(engine=None, csv=None, ini=None, fim=None):
+def ler_realizado(engine=None, csv=None, ini=None, fim=None, tabela="fac_ons_geracao_solar"):
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8", thousands=".")
     else:
         from sqlalchemy import text
         with engine.connect() as con:
             con.execute(text("SET statement_timeout = '300s'"))
-            d = pd.read_sql(text("""SELECT subsistema, dia, hora, carga FROM fac_ons_geracao_solar
-                                    WHERE dia >= :ini AND dia <= :fim"""), con, params={"ini": ini, "fim": fim})
+            cols = pd.read_sql(text("""SELECT column_name FROM information_schema.columns WHERE table_name = :t"""),
+                               con, params={"t": tabela}).column_name.tolist()
+            falta = {"subsistema", "dia", "hora", "carga"} - set(cols)
+            if falta:
+                raise SystemExit(f"{tabela}: colunas esperadas ausentes {sorted(falta)}; colunas existentes: {cols}")
+            d = pd.read_sql(text(f"""SELECT subsistema, dia, hora, carga FROM {tabela}
+                                     WHERE dia >= :ini AND dia <= :fim"""), con, params={"ini": ini, "fim": fim})
     d["valido_para"] = pd.to_datetime(d.dia.astype(str)) + pd.to_timedelta(d.hora.astype(str))
     d["mw"] = pd.to_numeric(d.carga, errors="coerce")
     d["subsistema"] = d.subsistema.astype(str).str.strip()
