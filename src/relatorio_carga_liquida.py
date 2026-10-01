@@ -49,7 +49,7 @@ TABELA_CARGA_REALIZADA = "fac_ons_carga"
 TABELA_CARGA_PROGRAMADA = "fac_sintegre_carga_dessem_hourly"   # carga do deck DESSEM (delta = antecedência em dias)
 TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
-TABELA_PLD = None                              # PLD horário CCEE: "fac_ccee_pld_hourly" liga o eixo auxiliar na ponta; None = desligado
+TABELA_PLD = "fac_ccee_pld_hourly"          # PLD horário CCEE (sist: SE, SU, NE, N) no eixo auxiliar da ponta; None = desligado
 PLD_AGREGACAO = "media"                       # "media" = média diária das 24h; "ponta" = PLD na hora da ponta da carga líquida
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 
@@ -259,12 +259,15 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     hs, ls = [h[i] for i in ordem], [l[i] for i in ordem]
     if pld is not None and not pld.empty:
         ax2 = ax.twinx()
-        ax2.bar(pld.index, pld.values, width=0.55, color="#7f7f7f", alpha=.28, label="PLD (média dos subsistemas)", zorder=0)
-        ax2.set_ylabel("PLD (R$/MWh)", color="#555"); ax2.tick_params(axis="y", colors="#555")
-        ax2.set_ylim(0, max(pld.max() * 2.4, 1))   # barras na metade inferior, sem cobrir as linhas
+        ax2.plot(pld.index, pld.values, color="#6a3d9a", lw=1.6, ls="-.", marker="D", ms=4, alpha=.85,
+                 label="PLD (média dos subsistemas)", zorder=1)
+        ax2.set_ylabel("PLD (R$/MWh)", color="#6a3d9a"); ax2.tick_params(axis="y", colors="#6a3d9a")
+        # eixo apertado em torno da faixa do PLD, para a variação acompanhar a da carga líquida
+        folga = max(0.15 * (pld.max() - pld.min()), 5)
+        ax2.set_ylim(pld.min() - folga, pld.max() + folga)
         for d, v in pld.items():
-            ax2.annotate(f"{v:.0f}", (d, v), textcoords="offset points", xytext=(0, 3), ha="center", fontsize=7.5, color="#555")
-        ax.set_zorder(ax2.get_zorder() + 1); ax.patch.set_visible(False)
+            ax2.annotate(f"{v:.0f}", (d, v), textcoords="offset points", xytext=(0, -12), ha="center", fontsize=7.5, color="#6a3d9a")
+        ax2.grid(False)
         h2, l2 = ax2.get_legend_handles_labels(); hs += h2; ls += l2
     ax.legend(hs, ls, loc="upper left", frameon=True)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
