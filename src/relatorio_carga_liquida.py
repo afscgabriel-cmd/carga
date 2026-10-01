@@ -51,6 +51,7 @@ TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
 SEM_REALIZADO = {"carga_liquida_ponta"}        # gráficos em que a linha verde (realizado) não é desenhada
 TABELA_PLD = "fac_ccee_pld_hourly"          # PLD horário CCEE (sist: SE, SU, NE, N) no eixo auxiliar da ponta; None = desligado
+PLD_ROTULOS = False                           # True = escreve o valor do PLD em cada ponto (pode sobrepor os rótulos da carga)
 PLD_AGREGACAO = "media"                       # "media" = média diária das 24h; "ponta" = PLD na hora da ponta da carga líquida
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 
@@ -266,8 +267,9 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
         # eixo apertado em torno da faixa do PLD, para a variação acompanhar a da carga líquida
         folga = max(0.15 * (pld.max() - pld.min()), 5)
         ax2.set_ylim(pld.min() - folga, pld.max() + folga)
-        for d, v in pld.items():
-            ax2.annotate(f"{v:.0f}", (d, v), textcoords="offset points", xytext=(0, -12), ha="center", fontsize=7.5, color="#6a3d9a")
+        if PLD_ROTULOS:
+            for d, v in pld.items():
+                ax2.annotate(f"{v:.0f}", (d, v), textcoords="offset points", xytext=(0, -12), ha="center", fontsize=7.5, color="#6a3d9a")
         ax2.grid(False)
         h2, l2 = ax2.get_legend_handles_labels(); hs += h2; ls += l2
     ax.legend(hs, ls, loc="upper left", frameon=True)
