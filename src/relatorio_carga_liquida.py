@@ -179,7 +179,9 @@ def serie_diaria(w: pd.DataFrame, origem: str) -> pd.DataFrame:
     medias = g[cl.COMPONENTES + ["carga_liquida"]].mean()
     medias.columns = [f"{c}_media" for c in medias.columns]
     def media_diurna(v, col):
-        d = v.loc[v[col] > 0, col]
+        # "horas com sol": pontos acima de 5% do máximo do dia (o realizado nunca é zero exato à noite)
+        lim = 0.05 * v[col].max()
+        d = v.loc[v[col] > lim, col]
         return d.mean() if len(d) else 0.0
     ponta = pd.DataFrame({
         "solar_media_diurna": g.apply(lambda v: media_diurna(v, "solar"), include_groups=False),
@@ -302,7 +304,8 @@ def main():
         if "carga_liquida" in xr.columns:
             sd_real["carga_liquida_ponta_real"] = gr_.carga_liquida.max()
             sd_real["carga_liquida_min_real"] = gr_.carga_liquida.min()
-        sd_real["solar_media_diurna_real"] = gr_.apply(lambda v: v.loc[v.solar > 0, "solar"].mean() if (v.solar > 0).any() else 0.0, include_groups=False)
+        sd_real["solar_media_diurna_real"] = gr_.apply(
+            lambda v: v.loc[v.solar > 0.05 * v.solar.max(), "solar"].mean() if (v.solar > 0).any() else 0.0, include_groups=False)
         sd_real["solar_max_real"] = gr_.solar.max()
         sd_real = sd_real.reset_index()
         print(f"realizado ONS: {sd_real.dia.nunique()} dias, variáveis {[c.replace('_real', '') for c in sd_real.columns if c.endswith('_real')]}", flush=True)
@@ -332,10 +335,10 @@ def main():
         ("carga_media", "Carga  -  média diária", "previsão: prev_carga_dessem | programado: carga_dessem_hourly | realizado: fac_ons_carga"),
         ("eolica_media", "Geração eólica  -  média diária", "previsão: TEMPO OK | programado: DESSEM (UEE) | realizado: fac_ons_geracao_eolica"),
         ("solar_media", "Geração solar (UFV)  -  média diária (24h)", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
-        ("solar_media_diurna", "Geração solar (UFV)  -  média diurna (horas com sol)", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
+        ("solar_media_diurna", "Geração solar (UFV)  -  média diurna (horas com sol, > 5% do máximo)", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
         ("solar_max", "Geração solar (UFV)  -  máximo diário", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
         ("MGD_media", "MMGD  -  média diária (24h)", "previsão: DESSEM estendido | programado: DESSEM D+0"),
-        ("MGD_media_diurna", "MMGD  -  média diurna (horas com sol)", "previsão: DESSEM estendido | programado: DESSEM D+0"),
+        ("MGD_media_diurna", "MMGD  -  média diurna (horas com sol, > 5% do máximo)", "previsão: DESSEM estendido | programado: DESSEM D+0"),
         ("UTE_media", "UTE biomassa  -  média diária", "previsão: DESSEM estendido | programado: DESSEM D+0"),
         ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  média diária", "previsão: DESSEM estendido | programado: DESSEM D+0"),
     ]
