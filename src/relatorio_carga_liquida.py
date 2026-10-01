@@ -42,6 +42,11 @@ import solar_ons as so
 import validar_solar as vs
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "relatorio"
+# Realizado ONS (linha extra no passado). Carga: informe o nome da tabela (colunas subsistema, dia, hora, carga);
+# None = sem carga realizada (aí só solar e eólica ganham a linha de realizado).
+TABELA_CARGA_REALIZADA = None
+TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
+TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 
 
@@ -189,7 +194,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     fig.text(0.99, 0.965, f"Rodada de {rod.strftime('%d/%m/%Y')}", ha="right", fontsize=11, color="#555")
     fig.text(0.01, 0.01, f"Fonte: {fonte}", ha="left", fontsize=9.5, color="#555")
     h, l = ax.get_legend_handles_labels()
-    ordem = [l.index("Realizado"), l.index("Previsao")] if "Realizado" in l else range(len(l))
+    ordem = [l.index(k) for k in ["Realizado", "Realizado ONS", "Previsao"] if k in l]
     ax.legend([h[i] for i in ordem], [l[i] for i in ordem], loc="upper left", frameon=True)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
@@ -244,6 +249,35 @@ def main():
     pas = pd.concat([c0, e0, r0, s0]); pas = pas[(pas.valido_para >= ini) & (pas.valido_para < rod)]
     w_pas = cl.montar([pas]) if not pas.empty else None
 
+    # ---- realizado ONS no passado (linha extra): solar, eólica e, se houver tabela, carga e carga líquida
+    try:
+        sol_r = realizado_30min(eng, TABELA_SOLAR_REALIZADA, "solar", ini, fim_pass, a.realizado_csv)
+        eol_r = realizado_30min(eng, TABELA_EOLICA_REALIZADA, "eolica", ini, fim_pass, a.realizado_eolica_csv)
+        comps = [sol_r, eol_r]
+        if TABELA_CARGA_REALIZADA:
+            comps.append(realizado_30min(eng, TABELA_CARGA_REALIZADA, "carga", ini, fim_pass, None))
+            comps.append(r0)   # renováveis flat não têm realizado: entram em D+0
+            w_real = cl.montar(comps)
+        else:
+            w_real = pd.concat(comps).pivot_table(index=["valido_para", "subsistema"], columns="componente", values="mw", aggfunc="sum")
+            sin_r = w_real.groupby(level=0).sum(); sin_r["subsistema"] = "SIN"; sin_r = sin_r.set_index("subsistema", append=True)
+            w_real = pd.concat([w_real, sin_r]).sort_index()
+            w_real = w_real[(w_real.index.get_level_values(0) >= ini) & (w_real.index.get_level_values(0) < rod)]
+        xr = w_real.reset_index(); xr["dia"] = xr.valido_para.dt.normalize()
+        gr_ = xr.groupby(["dia", "subsistema"])
+        sd_real = gr_[[c for c in ["carga", "eolica", "solar", "carga_liquida"] if c in xr.columns]].mean()
+        sd_real.columns = [f"{c}_media_real" for c in sd_real.columns]
+        if "carga_liquida" in xr.columns:
+            sd_real["carga_liquida_ponta_real"] = gr_.carga_liquida.max()
+            sd_real["carga_liquida_min_real"] = gr_.carga_liquida.min()
+        sd_real["solar_media_diurna_real"] = gr_.apply(lambda v: v.loc[v.solar > 0, "solar"].mean() if (v.solar > 0).any() else 0.0, include_groups=False)
+        sd_real["solar_max_real"] = gr_.solar.max()
+        sd_real = sd_real.reset_index()
+        print(f"realizado ONS: {sd_real.dia.nunique()} dias, variáveis {[c.replace('_real', '') for c in sd_real.columns if c.endswith('_real')]}", flush=True)
+    except SystemExit as e:
+        print(f"realizado ONS indisponível ({e}); gráficos sem a linha de realizado", flush=True)
+        sd_real = None
+
     # ---- série diária
     partes = []
     if w_pas is not None and not w_pas.empty:
@@ -251,6 +285,8 @@ def main():
     partes.append(serie_diaria(w_prev, "previsão"))
     sd = pd.concat(partes, ignore_index=True).sort_values(["subsistema", "dia"])
     sd = sd[sd.n_pontos >= 40]   # só dias completos
+    if sd_real is not None:
+        sd = sd.merge(sd_real, on=["dia", "subsistema"], how="left")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     tag = rod.strftime("%Y%m%d")
     sd.round(1).to_csv(OUTPUT_DIR / f"serie_diaria_{tag}.csv", sep=";", decimal=",", index=False, encoding="utf-8-sig")
