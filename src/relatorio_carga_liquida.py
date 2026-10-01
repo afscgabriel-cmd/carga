@@ -272,7 +272,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
                 ax2.annotate(f"{v:.0f}", (d, v), textcoords="offset points", xytext=(0, -12), ha="center", fontsize=7.5, color="#6a3d9a")
         ax2.grid(False)
         h2, l2 = ax2.get_legend_handles_labels(); hs += h2; ls += l2
-    ax.legend(hs, ls, loc="upper left", frameon=True)
+    ax.legend(hs, ls, loc="best", frameon=True, framealpha=.9)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
     fig.savefig(arq, dpi=120); plt.close(fig)
