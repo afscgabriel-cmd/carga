@@ -51,7 +51,22 @@ SUBS = ["SE", "S", "NE", "N", "SIN"]
 
 
 # ------------------------------------------------------------------ passado (D+0 de cada rodada)
-def carga_d0(engine, ini, csv=None):
+def _mais_recente_por_dia(d, col_rodada, nome):
+    """Para cada dia: linhas da rodada mais recente com rodada <= dia (D+0 quando existe)."""
+    d = d.copy()
+    d["dia"] = d.valido_para.dt.normalize()
+    d = d[d[col_rodada] <= d.dia]
+    melhor = d.groupby(["dia", "subsistema"])[col_rodada].transform("max")
+    d = d[d[col_rodada] == melhor]
+    usados = d.groupby("dia")[col_rodada].max()
+    atras = usados[usados < usados.index]
+    if len(atras):
+        print(f"{nome}: {len(atras)} dia(s) sem D+0 preenchidos com a rodada anterior: "
+              f"{ {k.date().isoformat(): v.date().isoformat() for k, v in atras.items()} }", flush=True)
+    return d
+
+
+def carga_passado(engine, ini, csv=None):
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
     else:
@@ -60,15 +75,15 @@ def carga_d0(engine, ini, csv=None):
             con.execute(text("SET statement_timeout = '600s'"))
             d = pd.read_sql(text("""SELECT datarodada, valido_para, val_previsaocarga, mnemonico_subsistema
                                     FROM fac_sintegre_prev_carga_dessem WHERE datarodada >= :ini"""), con, params={"ini": ini.date()})
-    d["datarodada"] = pd.to_datetime(d.datarodada); d["valido_para"] = pd.to_datetime(d.valido_para)
+    d["datarodada"] = pd.to_datetime(d.datarodada).dt.normalize(); d["valido_para"] = pd.to_datetime(d.valido_para)
     if cl.CARGA_ROTULO_FIM:
         d["valido_para"] -= pd.Timedelta(minutes=30)
-    d = d[d.valido_para.dt.normalize() == d.datarodada.dt.normalize()]
-    s = cl._serie(d, "valido_para", "mnemonico_subsistema", "val_previsaocarga", "carga")
-    return s
+    d["subsistema"] = d.mnemonico_subsistema.astype(str).str.strip()
+    d = _mais_recente_por_dia(d, "datarodada", "carga")
+    return cl._serie(d, "valido_para", "subsistema", "val_previsaocarga", "carga")
 
 
-def eolica_d0(engine, ini, csv=None):
+def eolica_passado(engine, ini, csv=None):
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
     else:
@@ -78,8 +93,9 @@ def eolica_d0(engine, ini, csv=None):
             d = pd.read_sql(text("""SELECT rodada_dia, valido_para, geracao, mnemonico_subsistema
                                     FROM fac_tempook_geracao_eolica_hourly WHERE valido_para_dia >= :ini"""), con, params={"ini": ini.date()})
     d["rodada_dia"] = pd.to_datetime(d.rodada_dia); d["valido_para"] = pd.to_datetime(d.valido_para)
-    d = d[d.valido_para.dt.normalize() == d.rodada_dia]
-    s = cl._serie(d, "valido_para", "mnemonico_subsistema", "geracao", "eolica")
+    d["subsistema"] = d.mnemonico_subsistema.astype(str).str.strip()
+    d = _mais_recente_por_dia(d, "rodada_dia", "eólica")
+    s = cl._serie(d, "valido_para", "subsistema", "geracao", "eolica")
     if cl.EOLICA_EM_GW:
         s["mw"] *= 1000
     return s
@@ -107,24 +123,37 @@ def renovaveis_passado(engine, dias, csv=None):
     return s[["valido_para", "subsistema", "componente", "mw"]]
 
 
-def solar_d0_decks(ini, fim, pasta=None):
-    """D+0 dos decks disponíveis na pasta. Devolve (série 30 min, conjunto de dias com deck)."""
+def solar_passado_decks(ini, fim, pasta=None):
+    """Para cada dia: o deck daquele dia (D+0); se não existir, o deck mais recente anterior.
+    Devolve (série 30 min, dias cobertos)."""
     pasta = pasta or so.PASTA_DECKS
-    partes, dias = [], set()
+    decks = {}
     for z in sorted(pasta.glob("Deck_Previsao_*.zip")):
         m = so.re.search(r"Deck_Previsao_(\d{8})", z.name)
-        if not m:
+        if m and m[1] not in decks:
+            decks[m[1]] = z
+    datas = sorted(pd.to_datetime(k, format="%Y%m%d") for k in decks)
+    partes, cobertos, atras = [], set(), {}
+    cache = {}
+    for dia in pd.date_range(ini, fim):
+        cand = [d for d in datas if d <= dia and (dia - d).days <= 9]
+        if not cand:
             continue
-        deck = pd.to_datetime(m[1], format="%Y%m%d")
-        if deck < ini or deck > fim or deck in dias:
+        deck = max(cand)
+        if deck not in cache:
+            cache[deck] = so.somar_meia_hora(so.ler_previsoes(decks[deck.strftime("%Y%m%d")]))
+        meia = cache[deck]; meia = meia[meia.index.normalize() == dia]
+        if meia.empty:
             continue
-        meia = so.somar_meia_hora(so.ler_previsoes(z))
-        meia = meia[meia.index.normalize() == deck]
         x = meia.drop(columns="SIN").stack().rename("mw").reset_index(); x.columns = ["valido_para", "subsistema", "mw"]
-        partes.append(x); dias.add(deck)
+        partes.append(x); cobertos.add(dia)
+        if deck < dia:
+            atras[dia.date().isoformat()] = deck.date().isoformat()
+    if atras:
+        print(f"solar: {len(atras)} dia(s) sem deck próprio usam o deck anterior: {atras}", flush=True)
     s = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(columns=["valido_para", "subsistema", "mw"])
     s["componente"] = "solar"
-    return s, dias
+    return s, cobertos
 
 
 def realizado_30min(engine, tabela, componente, ini, fim, csv=None):
@@ -204,6 +233,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dias", type=int, default=30, help="tamanho da janela (passado + previsão)")
+    ap.add_argument("--hoje", help="fronteira passado/previsão (padrão: a data mais recente entre as rodadas)")
     ap.add_argument("--subsistema", default="SIN", choices=["SIN", "SE", "S", "NE", "N"], help="qual subsistema desenhar")
     ap.add_argument("--horizonte", type=int, default=10)
     ap.add_argument("--deck"); ap.add_argument("--carga-csv"); ap.add_argument("--eolica-csv"); ap.add_argument("--renov-csv")
@@ -215,38 +245,42 @@ def main():
     offline = a.carga_csv and a.eolica_csv and a.renov_csv and a.realizado_csv and (a.realizado_eolica_csv or a.passado == "d0")
     eng = None if offline else gr.engine_banco()
 
-    # ---- previsão atual (igual ao carga_liquida.py)
-    carga, rod = cl.ler_carga(eng, a.carga_csv)
+    # ---- previsão atual (igual ao carga_liquida.py); fronteira = hoje (as fontes podem estar em rodadas diferentes)
+    carga, rod_carga = cl.ler_carga(eng, a.carga_csv)
     eol = cl.ler_eolica(eng, a.eolica_csv)
     sol = cl.ler_solar(a.deck)
     ren = cl.ler_renovaveis(eng, a.renov_csv, a.horizonte)
+    hoje = pd.Timestamp(a.hoje) if a.hoje else max(rod_carga, eol.valido_para.min().normalize(), sol.valido_para.min().normalize())
+    rod = hoje
     w_prev = cl.montar([carga, eol, sol, ren])
+    w_prev = w_prev[w_prev.index.get_level_values(0) >= hoje]
     fim_prev = w_prev.index.get_level_values(0).max().normalize()
     ini = fim_prev - pd.Timedelta(days=a.dias)
-    print(f"janela: {ini.date()} a {fim_prev.date()} | rodada {rod.date()}", flush=True)
+    print(f"janela: {ini.date()} a {fim_prev.date()} | fronteira (hoje): {hoje.date()} | rodadas: carga {rod_carga.date()}, "
+          f"eólica {eol.valido_para.min().date()}, deck solar {sol.valido_para.min().date()}", flush=True)
 
-    # ---- passado: realizado (solar, eólica) e D+0 (carga, renováveis), até o dia anterior à rodada atual
-    fim_pass = rod - pd.Timedelta(days=1)
+    # ---- passado: dias < hoje, cada fonte com a informação mais recente disponível para o dia
+    fim_pass = hoje - pd.Timedelta(days=1)
     print("lendo passado...", flush=True)
-    c0 = carga_d0(eng, ini, a.carga_csv)
+    c0 = carga_passado(eng, ini, a.carga_csv)
     r0 = renovaveis_passado(eng, (fim_pass - ini).days + 2, a.renov_csv)
     if a.passado == "realizado":
-        s0 = realizado_30min(eng, "fac_ons_geracao_solar", "solar", ini, fim_pass, a.realizado_csv)
-        e0 = realizado_30min(eng, "fac_ons_geracao_eolica", "eolica", ini, fim_pass, a.realizado_eolica_csv)
+        s0 = realizado_30min(eng, TABELA_SOLAR_REALIZADA, "solar", ini, fim_pass, a.realizado_csv)
+        e0 = realizado_30min(eng, TABELA_EOLICA_REALIZADA, "eolica", ini, fim_pass, a.realizado_eolica_csv)
         rotulo = "passado: solar/eólica REALIZADAS (com corte), carga/renováveis D+0"
     else:
-        e0 = eolica_d0(eng, ini, a.eolica_csv)
-        s0, dias_deck = solar_d0_decks(ini, fim_pass, Path(a.deck).parent if a.deck else None)
-        sem_deck = pd.date_range(ini, fim_pass).difference(pd.DatetimeIndex(sorted(dias_deck)))
+        e0 = eolica_passado(eng, ini, a.eolica_csv)
+        s0, cobertos = solar_passado_decks(ini, fim_pass, Path(a.deck).parent if a.deck else None)
+        sem_deck = pd.date_range(ini, fim_pass).difference(pd.DatetimeIndex(sorted(cobertos)))
         if len(sem_deck):
-            print(f"solar: {len(dias_deck)} dias com deck (D+0); {len(sem_deck)} dias sem deck usam o realizado "
+            print(f"solar: {len(cobertos)} dias com deck; {len(sem_deck)} dias sem nenhum deck usam o realizado "
                   f"({sem_deck.min().date()} a {sem_deck.max().date()})", flush=True)
-            sr = realizado_30min(eng, "fac_ons_geracao_solar", "solar", sem_deck.min(), sem_deck.max(), a.realizado_csv)
+            sr = realizado_30min(eng, TABELA_SOLAR_REALIZADA, "solar", sem_deck.min(), sem_deck.max(), a.realizado_csv)
             s0 = pd.concat([s0, sr[sr.valido_para.dt.normalize().isin(sem_deck)]], ignore_index=True)
         else:
-            print(f"solar: {len(dias_deck)} dias com deck (D+0), nenhum dia sem deck", flush=True)
+            print(f"solar: {len(cobertos)} dias com deck, nenhum dia sem deck", flush=True)
         rotulo = "passado: D+0 (mesma base da previsão)"
-    pas = pd.concat([c0, e0, r0, s0]); pas = pas[(pas.valido_para >= ini) & (pas.valido_para < rod)]
+    pas = pd.concat([c0, e0, r0, s0]); pas = pas[(pas.valido_para >= ini) & (pas.valido_para < hoje)]
     w_pas = cl.montar([pas]) if not pas.empty else None
 
     # ---- realizado ONS no passado (linha extra): solar, eólica e, se houver tabela, carga e carga líquida
