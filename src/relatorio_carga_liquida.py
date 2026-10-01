@@ -14,7 +14,8 @@ Futuro: a previsão atual do carga_liquida.py.
 Saídas em output/relatorio/ (um PNG por variável, estilo padrão: azul = realizado/D+0, vermelho = previsão):
     serie_diaria_<rodada>.csv          por dia e subsistema: média de cada variável, ponta, mínimo, hora da ponta
     carga_liquida_ponta_<rodada>.png, carga_liquida_media_<rodada>.png, carga_liquida_min_<rodada>.png,
-    carga_media_, eolica_media_, solar_media_, MGD_media_, UTE_media_, hidro_pequenas_media_<rodada>.png
+    carga_media_, eolica_media_, solar_media_ (24h), solar_media_diurna_, solar_max_,
+    MGD_media_ (24h), MGD_media_diurna_, UTE_media_, hidro_pequenas_media_<rodada>.png
     (com --subsistema SE/S/NE/N, o mesmo conjunto para o subsistema escolhido)
 
 Uso:
@@ -139,7 +140,13 @@ def serie_diaria(w: pd.DataFrame, origem: str) -> pd.DataFrame:
     g = x.groupby(["dia", "subsistema"])
     medias = g[cl.COMPONENTES + ["carga_liquida"]].mean()
     medias.columns = [f"{c}_media" for c in medias.columns]
+    def media_diurna(v, col):
+        d = v.loc[v[col] > 0, col]
+        return d.mean() if len(d) else 0.0
     ponta = pd.DataFrame({
+        "solar_media_diurna": g.apply(lambda v: media_diurna(v, "solar"), include_groups=False),
+        "MGD_media_diurna": g.apply(lambda v: media_diurna(v, "MGD"), include_groups=False),
+        "solar_max": g.solar.max(),
         "carga_liquida_ponta": g.carga_liquida.max(),
         "hora_ponta": g.apply(lambda v: v.loc[v.carga_liquida.idxmax(), "valido_para"].strftime("%H:%M"), include_groups=False),
         "carga_liquida_min": g.carga_liquida.min(),
@@ -256,8 +263,11 @@ def main():
         ("carga_liquida_min", "Carga liquida  -  minimo diario", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
         ("carga_media", "Carga  -  media diaria", "prev_carga_dessem"),
         ("eolica_media", "Geracao eolica  -  media diaria", "TEMPO OK"),
-        ("solar_media", "Geracao solar (UFV)  -  media diaria", "deck de previsao ONS"),
-        ("MGD_media", "MMGD  -  media diaria", "DESSEM"),
+        ("solar_media", "Geracao solar (UFV)  -  media diaria (24h)", "deck de previsao ONS"),
+        ("solar_media_diurna", "Geracao solar (UFV)  -  media diurna (horas com sol)", "deck de previsao ONS"),
+        ("solar_max", "Geracao solar (UFV)  -  maximo diario", "deck de previsao ONS"),
+        ("MGD_media", "MMGD  -  media diaria (24h)", "DESSEM"),
+        ("MGD_media_diurna", "MMGD  -  media diurna (horas com sol)", "DESSEM"),
         ("UTE_media", "UTE biomassa  -  media diaria", "DESSEM"),
         ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  media diaria", "DESSEM"),
     ]
