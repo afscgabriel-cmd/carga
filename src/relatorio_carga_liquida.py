@@ -49,7 +49,7 @@ TABELA_CARGA_REALIZADA = "fac_ons_carga"
 TABELA_CARGA_PROGRAMADA = "fac_sintegre_carga_dessem_hourly"   # carga do deck DESSEM (delta = antecedência em dias)
 TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
-TABELA_PLD = "fac_ccee_pld_hourly"          # PLD horário CCEE (sist: SE, SU, NE, N); None = sem PLD no gráfico
+TABELA_PLD = None                              # PLD horário CCEE: "fac_ccee_pld_hourly" liga o eixo auxiliar na ponta; None = desligado
 PLD_AGREGACAO = "media"                       # "media" = média diária das 24h; "ponta" = PLD na hora da ponta da carga líquida
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 
