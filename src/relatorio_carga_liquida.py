@@ -2,13 +2,14 @@
 """Relatório de apresentação: médias diárias e ponta da carga líquida numa janela de ~2 meses,
 com o passado (D+0 de cada rodada) e, no fim, a previsão atual.
 
-Passado (dias já ocorridos), na mesma base da previsão (geração DISPONÍVEL, sem corte):
-    carga        D+0 de fac_sintegre_prev_carga_dessem
-    eólica       D+0 de fac_tempook_geracao_eolica_hourly
-    renováveis   D+0 de fac_ons_renovaveis
-    solar        D+0 do deck de cada dia em solar_ons.PASTA_DECKS; dias sem deck: realizado (fac_ons_geracao_solar)
-Com --passado realizado, solar e eólica usam o realizado do ONS (fac_ons_geracao_solar/eolica),
-que inclui o corte de geração e por isso fica abaixo da previsão no meio do dia.
+Três linhas por variável:
+    Previsão   (vermelho) carga: fac_sintegre_prev_carga_dessem | eólica: fac_tempook_geracao_eolica_hourly |
+                          solar: deck ONS | UTE/PCH/CGH/UHE/MGD: DESSEM estendido por perfil
+    Programado (azul)     o deck DESSEM do próprio dia (D+0): carga de fac_sintegre_carga_dessem_hourly (delta 0),
+                          eólica (UEE), solar (UFV) e demais fontes de fac_ons_renovaveis. Dia sem D+0 ainda
+                          carregado: rodada mais recente anterior.
+    Realizado  (verde)    fac_ons_carga, fac_ons_geracao_eolica, fac_ons_geracao_solar (tempo real ONS);
+                          UTE/PCH/CGH/UHE/MGD não têm realizado por fonte: entram com o programado.
 Futuro: a previsão atual do carga_liquida.py.
 
 Saídas em output/relatorio/ (um PNG por variável, estilo padrão: azul = realizado/D+0, vermelho = previsão):
@@ -45,6 +46,7 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "relatorio"
 # Realizado ONS (linha extra no passado). Carga: informe o nome da tabela (colunas subsistema, dia, hora, carga);
 # None = sem carga realizada (aí só solar e eólica ganham a linha de realizado).
 TABELA_CARGA_REALIZADA = "fac_ons_carga"
+TABELA_CARGA_PROGRAMADA = "fac_sintegre_carga_dessem_hourly"   # carga do deck DESSEM (delta = antecedência em dias)
 TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
 SUBS = ["SE", "S", "NE", "N", "SIN"]
@@ -68,21 +70,20 @@ def _mais_recente_por_dia(d, col_rodada, nome, fim=None):
     return d
 
 
-def carga_passado(engine, ini, fim, csv=None):
+def carga_programada(engine, ini, fim, csv=None):
+    """Carga do deck DESSEM (fac_sintegre_carga_dessem_hourly), rodada mais recente <= dia (delta 0 quando existe)."""
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
     else:
         from sqlalchemy import text
         with engine.connect() as con:
             con.execute(text("SET statement_timeout = '600s'"))
-            d = pd.read_sql(text("""SELECT datarodada, valido_para, val_previsaocarga, mnemonico_subsistema
-                                    FROM fac_sintegre_prev_carga_dessem WHERE datarodada >= :ini"""), con, params={"ini": ini.date()})
-    d["datarodada"] = pd.to_datetime(d.datarodada).dt.normalize(); d["valido_para"] = pd.to_datetime(d.valido_para)
-    if cl.CARGA_ROTULO_FIM:
-        d["valido_para"] -= pd.Timedelta(minutes=30)
-    d["subsistema"] = d.mnemonico_subsistema.astype(str).str.strip()
-    d = _mais_recente_por_dia(d, "datarodada", "carga", fim)
-    return cl._serie(d, "valido_para", "subsistema", "val_previsaocarga", "carga")
+            d = pd.read_sql(text(f"""SELECT rodada, valido_para, subsystem, demanda FROM {TABELA_CARGA_PROGRAMADA}
+                                     WHERE dia >= :ini AND dia <= :fim"""), con, params={"ini": ini.date(), "fim": fim.date()})
+    d["rodada"] = pd.to_datetime(d.rodada).dt.normalize(); d["valido_para"] = pd.to_datetime(d.valido_para)
+    d["subsistema"] = d.subsystem.astype(str).str.strip()
+    d = _mais_recente_por_dia(d, "rodada", "carga programada", fim)
+    return cl._serie(d, "valido_para", "subsistema", "demanda", "carga")
 
 
 def eolica_passado(engine, ini, fim, csv=None):
@@ -103,14 +104,14 @@ def eolica_passado(engine, ini, fim, csv=None):
     return s
 
 
-def renovaveis_passado(engine, dias, csv=None):
-    """Para cada dia passado: o D+0 da rodada daquele dia; se não existir (rodada ainda não carregada),
-    a previsão da rodada mais recente anterior ao dia (D+1, D+2...). Nenhum dia fica sem valor."""
+def renovaveis_programadas(engine, dias, csv=None, fontes=("UTE", "PCH", "CGH", "UHE", "MGD", "UEE", "UFV")):
+    """Deck DESSEM do próprio dia (D+0) para cada fonte; se não existir, a rodada mais recente anterior.
+    UEE vira 'eolica' e UFV vira 'solar' (programado do DESSEM para essas duas)."""
     if csv:
-        d0, _ = gr.ler_csv(csv)
+        d0, _ = gr.ler_csv(csv, fontes=list(fontes))
         d = d0
     else:
-        _, _, d = gr.ler_banco(engine, dias=dias, completo=True)
+        _, _, d = gr.ler_banco(engine, dias=dias, completo=True, fontes=list(fontes))
     d = d.copy()
     d["dia"] = d.valido_para.dt.normalize()
     d = d[(d.rodada_dia <= d.dia) & (d.dia <= d.rodada_dia.max() + pd.Timedelta(days=7))]
@@ -119,9 +120,10 @@ def renovaveis_passado(engine, dias, csv=None):
     usados = d.groupby("dia").rodada_dia.max()
     atras = usados[usados < usados.index]
     if len(atras):
-        print(f"renováveis: {len(atras)} dia(s) sem D+0 preenchidos com a rodada anterior: "
+        print(f"DESSEM: {len(atras)} dia(s) sem D+0 preenchidos com a rodada anterior: "
               f"{ {k.date().isoformat(): v.date().isoformat() for k, v in atras.items()} }", flush=True)
     s = d.rename(columns={"tipo_fonte_energia": "componente", "submercado": "subsistema", "previsao": "mw"})
+    s["componente"] = s.componente.replace({"UEE": "eolica", "UFV": "solar"})
     return s[["valido_para", "subsistema", "componente", "mw"]]
 
 
@@ -245,12 +247,12 @@ def main():
     ap.add_argument("--subsistema", default="SIN", choices=["SIN", "SE", "S", "NE", "N"], help="qual subsistema desenhar")
     ap.add_argument("--horizonte", type=int, default=10)
     ap.add_argument("--deck"); ap.add_argument("--carga-csv"); ap.add_argument("--eolica-csv"); ap.add_argument("--renov-csv")
-    ap.add_argument("--passado", choices=["d0", "realizado"], default="d0",
-                    help="passado de solar/eólica: d0 = mesma base da previsão (padrão); realizado = ONS, com corte")
+    ap.add_argument("--carga-prog-csv", help="teste: CSV no formato de fac_sintegre_carga_dessem_hourly")
+    ap.add_argument("--carga-real-csv", help="teste: CSV no formato de fac_ons_carga")
     ap.add_argument("--realizado-csv"); ap.add_argument("--realizado-eolica-csv")
     a = ap.parse_args()
     t0 = time.time()
-    offline = a.carga_csv and a.eolica_csv and a.renov_csv and a.realizado_csv and (a.realizado_eolica_csv or a.passado == "d0")
+    offline = a.carga_csv and a.eolica_csv and a.renov_csv and a.realizado_csv and a.realizado_eolica_csv and a.carga_prog_csv
     eng = None if offline else gr.engine_banco()
 
     # ---- previsão atual (igual ao carga_liquida.py); fronteira = hoje (as fontes podem estar em rodadas diferentes)
@@ -267,28 +269,16 @@ def main():
     print(f"janela: {ini.date()} a {fim_prev.date()} | fronteira (hoje): {hoje.date()} | rodadas: carga {rod_carga.date()}, "
           f"eólica {eol.valido_para.min().date()}, deck solar {sol.valido_para.min().date()}", flush=True)
 
-    # ---- passado: dias < hoje, cada fonte com a informação mais recente disponível para o dia
+    # ---- passado = PROGRAMADO: deck DESSEM do próprio dia (D+0) para todas as variáveis
     fim_pass = hoje - pd.Timedelta(days=1)
-    print("lendo passado...", flush=True)
-    c0 = carga_passado(eng, ini, fim_pass, a.carga_csv)
-    r0 = renovaveis_passado(eng, (fim_pass - ini).days + 2, a.renov_csv)
-    if a.passado == "realizado":
-        s0 = realizado_30min(eng, TABELA_SOLAR_REALIZADA, "solar", ini, fim_pass, a.realizado_csv)
-        e0 = realizado_30min(eng, TABELA_EOLICA_REALIZADA, "eolica", ini, fim_pass, a.realizado_eolica_csv)
-        rotulo = "passado: solar/eólica REALIZADAS (com corte), carga/renováveis D+0"
-    else:
-        e0 = eolica_passado(eng, ini, fim_pass, a.eolica_csv)
-        s0, cobertos = solar_passado_decks(ini, fim_pass, Path(a.deck).parent if a.deck else None)
-        sem_deck = pd.date_range(ini, fim_pass).difference(pd.DatetimeIndex(sorted(cobertos)))
-        if len(sem_deck):
-            print(f"solar: {len(cobertos)} dias com deck; {len(sem_deck)} dias sem nenhum deck usam o realizado "
-                  f"({sem_deck.min().date()} a {sem_deck.max().date()})", flush=True)
-            sr = realizado_30min(eng, TABELA_SOLAR_REALIZADA, "solar", sem_deck.min(), sem_deck.max(), a.realizado_csv)
-            s0 = pd.concat([s0, sr[sr.valido_para.dt.normalize().isin(sem_deck)]], ignore_index=True)
-        else:
-            print(f"solar: {len(cobertos)} dias com deck, nenhum dia sem deck", flush=True)
-        rotulo = "passado: D+0 (mesma base da previsão)"
-    pas = pd.concat([c0, e0, r0, s0]); pas = pas[(pas.valido_para >= ini) & (pas.valido_para < hoje)]
+    print("lendo programado (DESSEM D+0)...", flush=True)
+    c0 = carga_programada(eng, ini, fim_pass, a.carga_prog_csv)
+    r0 = renovaveis_programadas(eng, (fim_pass - ini).days + 2, a.renov_csv)   # inclui eólica (UEE) e solar (UFV)
+    pas = pd.concat([c0, r0]); pas = pas[(pas.valido_para >= ini) & (pas.valido_para < hoje)]
+    faltam = set(cl.COMPONENTES) - set(pas.componente.unique())
+    if faltam:
+        print(f"AVISO: programado sem as fontes {sorted(faltam)} no DESSEM lido", flush=True)
+    rotulo = "programado: deck DESSEM D+0"
     w_pas = cl.montar([pas]) if not pas.empty else None
 
     # ---- realizado ONS no passado (linha extra): solar, eólica e, se houver tabela, carga e carga líquida
@@ -297,8 +287,8 @@ def main():
         eol_r = realizado_30min(eng, TABELA_EOLICA_REALIZADA, "eolica", ini, fim_pass, a.realizado_eolica_csv)
         comps = [sol_r, eol_r]
         if TABELA_CARGA_REALIZADA:
-            comps.append(realizado_30min(eng, TABELA_CARGA_REALIZADA, "carga", ini, fim_pass, None))
-            comps.append(r0)   # renováveis flat não têm realizado: entram em D+0
+            comps.append(realizado_30min(eng, TABELA_CARGA_REALIZADA, "carga", ini, fim_pass, a.carga_real_csv))
+            comps.append(r0[~r0.componente.isin(["eolica", "solar"])])   # flats não têm realizado: entram com o programado
             w_real = cl.montar(comps)
         else:
             w_real = pd.concat(comps).pivot_table(index=["valido_para", "subsistema"], columns="componente", values="mw", aggfunc="sum")
@@ -336,18 +326,18 @@ def main():
     # ---- gráficos enxutos: um por variável, estilo padrão da equipe
     x = sd[sd.subsistema == a.subsistema].set_index("dia")
     graficos = [
-        ("carga_liquida_ponta", "Carga líquida  -  ponta diária (máximo)", "programado: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM; realizado: fac_ons_carga, fac_ons_geracao_eolica/solar"),
-        ("carga_liquida_media", "Carga líquida  -  média diária", "programado: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM; realizado: fac_ons_carga, fac_ons_geracao_eolica/solar"),
-        ("carga_liquida_min", "Carga líquida  -  mínimo diário", "programado: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM; realizado: fac_ons_carga, fac_ons_geracao_eolica/solar"),
-        ("carga_media", "Carga  -  média diária", "programado: prev_carga_dessem; realizado: fac_ons_carga"),
-        ("eolica_media", "Geração eólica  -  média diária", "TEMPO OK"),
-        ("solar_media", "Geração solar (UFV)  -  média diária (24h)", "deck de previsão ONS"),
-        ("solar_media_diurna", "Geração solar (UFV)  -  média diurna (horas com sol)", "deck de previsão ONS"),
-        ("solar_max", "Geração solar (UFV)  -  máximo diário", "deck de previsão ONS"),
-        ("MGD_media", "MMGD  -  média diária (24h)", "DESSEM"),
-        ("MGD_media_diurna", "MMGD  -  média diurna (horas com sol)", "DESSEM"),
-        ("UTE_media", "UTE biomassa  -  média diária", "DESSEM"),
-        ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  média diária", "DESSEM"),
+        ("carga_liquida_ponta", "Carga líquida  -  ponta diária (máximo)", "previsão: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM | programado: deck DESSEM D+0 | realizado: fac_ons_carga, geracao_eolica, geracao_solar"),
+        ("carga_liquida_media", "Carga líquida  -  média diária", "previsão: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM | programado: deck DESSEM D+0 | realizado: fac_ons_carga, geracao_eolica, geracao_solar"),
+        ("carga_liquida_min", "Carga líquida  -  mínimo diário", "previsão: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM | programado: deck DESSEM D+0 | realizado: fac_ons_carga, geracao_eolica, geracao_solar"),
+        ("carga_media", "Carga  -  média diária", "previsão: prev_carga_dessem | programado: carga_dessem_hourly | realizado: fac_ons_carga"),
+        ("eolica_media", "Geração eólica  -  média diária", "previsão: TEMPO OK | programado: DESSEM (UEE) | realizado: fac_ons_geracao_eolica"),
+        ("solar_media", "Geração solar (UFV)  -  média diária (24h)", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
+        ("solar_media_diurna", "Geração solar (UFV)  -  média diurna (horas com sol)", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
+        ("solar_max", "Geração solar (UFV)  -  máximo diário", "previsão: deck ONS | programado: DESSEM (UFV) | realizado: fac_ons_geracao_solar"),
+        ("MGD_media", "MMGD  -  média diária (24h)", "previsão: DESSEM estendido | programado: DESSEM D+0"),
+        ("MGD_media_diurna", "MMGD  -  média diurna (horas com sol)", "previsão: DESSEM estendido | programado: DESSEM D+0"),
+        ("UTE_media", "UTE biomassa  -  média diária", "previsão: DESSEM estendido | programado: DESSEM D+0"),
+        ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  média diária", "previsão: DESSEM estendido | programado: DESSEM D+0"),
     ]
     x["hidro_pequenas_media"] = x.PCH_media + x.CGH_media + x.UHE_media
     sufixo = "" if a.subsistema == "SIN" else f"_{a.subsistema}"

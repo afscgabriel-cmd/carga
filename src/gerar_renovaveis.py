@@ -47,7 +47,7 @@ def engine_banco():
     )
 
 
-def ler_banco(engine, rodada=None, dias=None, completo=False):
+def ler_banco(engine, rodada=None, dias=None, completo=False, fontes=None):
     """Devolve (d0, ultima): histórico D+0 dos últimos DIAS_PERFIL+7 dias e a rodada mais recente completa.
 
     Mesma consulta do atualizar_renovaveis_dessem.py (faixa de rodada_dia em lotes de 7 dias),
@@ -74,7 +74,7 @@ def ler_banco(engine, rodada=None, dias=None, completo=False):
             partes.append(pd.read_sql(sql, con, params={"ini": a.date(), "fim": b.date()}))
             print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas ({time.time()-t0:.0f}s)", flush=True)
     partes = [x for x in partes if not x.empty]
-    d = _tipar(pd.concat(partes, ignore_index=True)) if partes else pd.DataFrame(columns=["rodada_dia","valido_para_dia","valido_para","submercado","tipo_fonte_energia","previsao"])
+    d = _tipar(pd.concat(partes, ignore_index=True), fontes) if partes else pd.DataFrame(columns=["rodada_dia","valido_para_dia","valido_para","submercado","tipo_fonte_energia","previsao"])
     if d.empty:
         raise SystemExit("Nenhuma rodada nesse período.")
     rodada = d.rodada_dia.max()
@@ -85,7 +85,7 @@ def ler_banco(engine, rodada=None, dias=None, completo=False):
     return d0, d[d.rodada_dia == rodada]
 
 
-def ler_csv(caminho, rodada=None):
+def ler_csv(caminho, rodada=None, fontes=None):
     """Lê o prev_renovaveis_dessem.csv (saída do atualizar_renovaveis_dessem.py) ou o extrato zip de teste."""
     caminho = Path(caminho)
     t0 = time.time()
@@ -97,7 +97,7 @@ def ler_csv(caminho, rodada=None):
         d = pd.read_csv(caminho, sep=";", decimal=",", encoding="utf-8-sig")
     if "previsao_mw" in d.columns:
         d = d.rename(columns={"previsao_mw": "previsao"})
-    d = _tipar(d)
+    d = _tipar(d, fontes)
     print(f"  {len(d):,} linhas em {time.time()-t0:.0f}s", flush=True)
     fim = pd.Timestamp(rodada) if rodada else d.rodada_dia.max()
     ini = fim - pd.Timedelta(days=DIAS_PERFIL + 7)
@@ -110,8 +110,8 @@ def ler_csv(caminho, rodada=None):
     return d0, d[d.rodada_dia == rodada]
 
 
-def _tipar(d):
-    d = d[d.tipo_fonte_energia.isin(FONTES)].copy()
+def _tipar(d, fontes=None):
+    d = d[d.tipo_fonte_energia.isin(fontes or FONTES)].copy()
     d["rodada_dia"] = pd.to_datetime(d.rodada_dia)
     d["valido_para"] = pd.to_datetime(d.valido_para)
     d["previsao"] = pd.to_numeric(d.previsao, errors="coerce")
