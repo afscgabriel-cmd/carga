@@ -51,11 +51,13 @@ SUBS = ["SE", "S", "NE", "N", "SIN"]
 
 
 # ------------------------------------------------------------------ passado (D+0 de cada rodada)
-def _mais_recente_por_dia(d, col_rodada, nome):
+def _mais_recente_por_dia(d, col_rodada, nome, fim=None):
     """Para cada dia: linhas da rodada mais recente com rodada <= dia (D+0 quando existe)."""
     d = d.copy()
     d["dia"] = d.valido_para.dt.normalize()
     d = d[d[col_rodada] <= d.dia]
+    if fim is not None:
+        d = d[d.dia <= fim]
     melhor = d.groupby(["dia", "subsistema"])[col_rodada].transform("max")
     d = d[d[col_rodada] == melhor]
     usados = d.groupby("dia")[col_rodada].max()
@@ -66,7 +68,7 @@ def _mais_recente_por_dia(d, col_rodada, nome):
     return d
 
 
-def carga_passado(engine, ini, csv=None):
+def carga_passado(engine, ini, fim, csv=None):
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
     else:
@@ -79,11 +81,11 @@ def carga_passado(engine, ini, csv=None):
     if cl.CARGA_ROTULO_FIM:
         d["valido_para"] -= pd.Timedelta(minutes=30)
     d["subsistema"] = d.mnemonico_subsistema.astype(str).str.strip()
-    d = _mais_recente_por_dia(d, "datarodada", "carga")
+    d = _mais_recente_por_dia(d, "datarodada", "carga", fim)
     return cl._serie(d, "valido_para", "subsistema", "val_previsaocarga", "carga")
 
 
-def eolica_passado(engine, ini, csv=None):
+def eolica_passado(engine, ini, fim, csv=None):
     if csv:
         d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
     else:
@@ -94,7 +96,7 @@ def eolica_passado(engine, ini, csv=None):
                                     FROM fac_tempook_geracao_eolica_hourly WHERE valido_para_dia >= :ini"""), con, params={"ini": ini.date()})
     d["rodada_dia"] = pd.to_datetime(d.rodada_dia); d["valido_para"] = pd.to_datetime(d.valido_para)
     d["subsistema"] = d.mnemonico_subsistema.astype(str).str.strip()
-    d = _mais_recente_por_dia(d, "rodada_dia", "eólica")
+    d = _mais_recente_por_dia(d, "rodada_dia", "eólica", fim)
     s = cl._serie(d, "valido_para", "subsistema", "geracao", "eolica")
     if cl.EOLICA_EM_GW:
         s["mw"] *= 1000
@@ -111,7 +113,7 @@ def renovaveis_passado(engine, dias, csv=None):
         _, _, d = gr.ler_banco(engine, dias=dias, completo=True)
     d = d.copy()
     d["dia"] = d.valido_para.dt.normalize()
-    d = d[d.rodada_dia <= d.dia]
+    d = d[(d.rodada_dia <= d.dia) & (d.dia <= d.rodada_dia.max() + pd.Timedelta(days=7))]
     melhor = d.groupby(["dia", "tipo_fonte_energia", "submercado"]).rodada_dia.transform("max")
     d = d[d.rodada_dia == melhor]
     usados = d.groupby("dia").rodada_dia.max()
@@ -262,14 +264,14 @@ def main():
     # ---- passado: dias < hoje, cada fonte com a informação mais recente disponível para o dia
     fim_pass = hoje - pd.Timedelta(days=1)
     print("lendo passado...", flush=True)
-    c0 = carga_passado(eng, ini, a.carga_csv)
+    c0 = carga_passado(eng, ini, fim_pass, a.carga_csv)
     r0 = renovaveis_passado(eng, (fim_pass - ini).days + 2, a.renov_csv)
     if a.passado == "realizado":
         s0 = realizado_30min(eng, TABELA_SOLAR_REALIZADA, "solar", ini, fim_pass, a.realizado_csv)
         e0 = realizado_30min(eng, TABELA_EOLICA_REALIZADA, "eolica", ini, fim_pass, a.realizado_eolica_csv)
         rotulo = "passado: solar/eólica REALIZADAS (com corte), carga/renováveis D+0"
     else:
-        e0 = eolica_passado(eng, ini, a.eolica_csv)
+        e0 = eolica_passado(eng, ini, fim_pass, a.eolica_csv)
         s0, cobertos = solar_passado_decks(ini, fim_pass, Path(a.deck).parent if a.deck else None)
         sem_deck = pd.date_range(ini, fim_pass).difference(pd.DatetimeIndex(sorted(cobertos)))
         if len(sem_deck):
