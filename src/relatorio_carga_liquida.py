@@ -194,13 +194,19 @@ def serie_diaria(w: pd.DataFrame, origem: str) -> pd.DataFrame:
 
 
 def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq: Path):
-    """Um gráfico por variável: passado (azul, 'Realizado') e previsão (vermelho tracejado), em GW com rótulos."""
+    """Um gráfico por variável: Programado (azul, D+0), Realizado (verde, verificado ONS, quando houver) e Previsão (vermelho tracejado), em GW."""
     y = x[col] / 1000.0
     pas = y[x.origem != "previsão"]
     prv = y[x.origem == "previsão"]
     if not pas.empty:   # emenda: a previsão começa no último ponto do passado
         prv = pd.concat([pas.tail(1), prv])
     fig, ax = plt.subplots(figsize=(16, 6))
+    # realizado (verificado ONS), só no passado e só onde existir a coluna <col>_real
+    if f"{col}_real" in x.columns and not pas.empty:
+        real = (x[f"{col}_real"] / 1000.0).dropna()
+        real = real[real.index <= pas.index.max()]
+        if not real.empty:
+            ax.plot(real.index, real.values, color="#2ca02c", lw=1.6, marker="s", ms=4, alpha=.9, label="Realizado", zorder=1)
     # previsão: linha tracejada emendada no último realizado, mas marcadores só nos dias previstos
     ax.plot(prv.index, prv.values, color="#d62728", lw=2, ls="--", zorder=2)
     so_prev = prv.iloc[1:] if not pas.empty else prv
