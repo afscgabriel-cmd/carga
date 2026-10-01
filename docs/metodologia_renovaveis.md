@@ -175,7 +175,14 @@ Teste de deslocamento de hora: mínimo do MAE em 0 h, ou seja, não há desalinh
 ## Interpretação
 
 O erro não diminui com a antecedência, tem o mesmo sinal todos os dias e concentra-se no meio do
-dia, com o realizado formando um platô. Isso não é erro meteorológico: é **constrained-off**.
+dia, com o realizado formando um platô. Isso não é erro meteorológico: é **corte de geração (curtailment)**.
+
+Vocabulário: *curtailment* é qualquer redução comandada pelo ONS. Ele tem dois tipos: o **constrained-off**,
+por indisponibilidade externa à usina (limite de linha ou subestação), que gera ressarcimento via CCEE e é o
+objeto da NT-ONS DPL 0031/2024; e o **corte energético**, por sobra de oferta ou confiabilidade, sem
+ressarcimento. Nos dados de setembro/2026: o platô de ~12 GW nos dias úteis é constrained-off (limite de
+escoamento do NE, disputado por solar e eólica); os vales de fim de semana (razão 0,23 a 0,60) são corte
+energético, por carga baixa.
 
 Conforme a NT-ONS DPL 0031/2024 (Modelo de Estimação das Funções de Produtividade Fotovoltaica
 para Estimação de Energia Frustrada): o ONS comanda reduções de geração fotovoltaica por
@@ -198,8 +205,13 @@ a diferença é desprezível.
 Caso se deseje a carga líquida com a solar **injetada**, as alternativas são: (a) fator por hora do
 dia = mediana da razão realizado/previsto dos últimos N dias, aplicado ao deck; (b) a série de
 constrained-off fotovoltaico dos Dados Abertos do ONS (por usina e hora, com geração de
-referência, verificada e frustrada), que permite prever o corte de forma estrutural. O mesmo
-raciocínio vale para a eólica, cujo corte no NE é ainda maior.
+referência, verificada e frustrada), que cobre só a parte elétrica; a diferença restante é o corte
+energético. O mesmo raciocínio vale para a eólica, cujo corte no NE é ainda maior.
+
+Para análise de **preço**, o corte não entra: o DESSEM de formação de preço não representa os limites de
+linha (constrained-off), e o corte energético é resultado do próprio modelo quando a carga líquida
+disponível fica abaixo da geração inflexível (PLD no piso). A carga líquida na base disponível, por
+submercado, é o indicador correto.
 
 ## Passado nos relatórios
 
