@@ -49,6 +49,7 @@ TABELA_CARGA_REALIZADA = "fac_ons_carga"
 TABELA_CARGA_PROGRAMADA = "fac_sintegre_carga_dessem_hourly"   # carga do deck DESSEM (delta = antecedência em dias)
 TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
+SEM_REALIZADO = {"carga_liquida_ponta"}        # gráficos em que a linha verde (realizado) não é desenhada
 TABELA_PLD = "fac_ccee_pld_hourly"          # PLD horário CCEE (sist: SE, SU, NE, N) no eixo auxiliar da ponta; None = desligado
 PLD_AGREGACAO = "media"                       # "media" = média diária das 24h; "ponta" = PLD na hora da ponta da carga líquida
 SUBS = ["SE", "S", "NE", "N", "SIN"]
@@ -226,7 +227,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
         prv = pd.concat([pas.tail(1), prv])
     fig, ax = plt.subplots(figsize=(16, 6))
     # realizado (verificado ONS), só no passado e só onde existir a coluna <col>_real
-    if f"{col}_real" in x.columns and not pas.empty:
+    if f"{col}_real" in x.columns and not pas.empty and col not in SEM_REALIZADO:
         real = (x[f"{col}_real"] / 1000.0).dropna()
         real = real[real.index <= pas.index.max()]
         if not real.empty:
