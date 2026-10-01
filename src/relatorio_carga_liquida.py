@@ -206,7 +206,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     so_prev = prv.iloc[1:] if not pas.empty else prv
     ax.plot(so_prev.index, so_prev.values, color="#d62728", lw=0, marker="o", ms=6, zorder=3)
     ax.plot([], [], color="#d62728", lw=2, ls="--", marker="o", ms=6, label="Previsão")
-    ax.plot(pas.index, pas.values, color="#1f77b4", lw=2, marker="o", ms=6, label="Realizado", zorder=4)
+    ax.plot(pas.index, pas.values, color="#1f77b4", lw=2, marker="o", ms=6, label="Programado", zorder=4)
     # sombra e divisória entre o último realizado e o primeiro previsto
     ini_prev = (pas.index.max() + pd.Timedelta(hours=12)) if not pas.empty else prv.index.min()
     ax.axvspan(ini_prev, prv.index.max() + pd.Timedelta(hours=12), color="#d62728", alpha=.07)
@@ -225,7 +225,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     fig.text(0.99, 0.965, f"Rodada de {rod.strftime('%d/%m/%Y')}", ha="right", fontsize=11, color="#555")
     fig.text(0.01, 0.01, f"Fonte: {fonte}", ha="left", fontsize=9.5, color="#555")
     h, l = ax.get_legend_handles_labels()
-    ordem = [l.index(k) for k in ["Realizado", "Realizado ONS", "Previsão"] if k in l]
+    ordem = [l.index(k) for k in ["Programado", "Realizado", "Previsão"] if k in l]
     ax.legend([h[i] for i in ordem], [l[i] for i in ordem], loc="upper left", frameon=True)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
