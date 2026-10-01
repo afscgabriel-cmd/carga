@@ -49,6 +49,8 @@ TABELA_CARGA_REALIZADA = "fac_ons_carga"
 TABELA_CARGA_PROGRAMADA = "fac_sintegre_carga_dessem_hourly"   # carga do deck DESSEM (delta = antecedência em dias)
 TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
+TABELA_PLD = "fac_ccee_pld_hourly"          # PLD horário CCEE (sist: SE, SU, NE, N); None = sem PLD no gráfico
+PLD_AGREGACAO = "media"                       # "media" = média diária das 24h; "ponta" = PLD na hora da ponta da carga líquida
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 
 
@@ -160,6 +162,24 @@ def solar_passado_decks(ini, fim, pasta=None):
     return s, cobertos
 
 
+def ler_pld(engine, ini, fim, csv=None):
+    """PLD horário por subsistema -> série diária = média dos subsistemas (R$/MWh). Devolve DataFrame dia x [media, por hora]."""
+    if csv:
+        d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
+    else:
+        from sqlalchemy import text
+        with engine.connect() as con:
+            con.execute(text("SET statement_timeout = '300s'"))
+            d = pd.read_sql(text(f"""SELECT valido_para, sist, pld FROM {TABELA_PLD}
+                                     WHERE valido_para_dia >= :ini AND valido_para_dia <= :fim"""), con, params={"ini": ini.date(), "fim": fim.date()})
+    d["valido_para"] = pd.to_datetime(d.valido_para); d["pld"] = pd.to_numeric(d.pld, errors="coerce")
+    d["sist"] = d.sist.astype(str).str.strip().replace({"SU": "S"})
+    h = d.groupby("valido_para").pld.mean()          # média dos subsistemas, por hora
+    h = h[h.index.map(lambda t: d[d.valido_para == t].sist.nunique()) >= 3] if len(h) < 2000 else h
+    print(f"PLD ({TABELA_PLD}): {h.index.min()} a {h.index.max()}, subsistemas {sorted(d.sist.unique())}", flush=True)
+    return h
+
+
 def realizado_30min(engine, tabela, componente, ini, fim, csv=None):
     """Realizado horário (subsistema, dia, hora, carga) repetido nas duas meias-horas, sem a linha SIN."""
     real = vs.ler_realizado(engine, csv, ini.date(), fim.date(), tabela=tabela)
@@ -197,7 +217,7 @@ def serie_diaria(w: pd.DataFrame, origem: str) -> pd.DataFrame:
     return out.reset_index()
 
 
-def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq: Path):
+def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq: Path, pld: pd.Series | None = None):
     """Um gráfico por variável: Programado (azul, D+0), Realizado (verde, verificado ONS, quando houver) e Previsão (vermelho tracejado), em GW."""
     y = x[col] / 1000.0
     pas = y[x.origem != "previsão"]
@@ -236,7 +256,17 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     fig.text(0.01, 0.01, f"Fonte: {fonte}", ha="left", fontsize=9.5, color="#555")
     h, l = ax.get_legend_handles_labels()
     ordem = [l.index(k) for k in ["Programado", "Realizado", "Previsão"] if k in l]
-    ax.legend([h[i] for i in ordem], [l[i] for i in ordem], loc="upper left", frameon=True)
+    hs, ls = [h[i] for i in ordem], [l[i] for i in ordem]
+    if pld is not None and not pld.empty:
+        ax2 = ax.twinx()
+        ax2.bar(pld.index, pld.values, width=0.55, color="#7f7f7f", alpha=.28, label="PLD (média dos subsistemas)", zorder=0)
+        ax2.set_ylabel("PLD (R$/MWh)", color="#555"); ax2.tick_params(axis="y", colors="#555")
+        ax2.set_ylim(0, max(pld.max() * 2.4, 1))   # barras na metade inferior, sem cobrir as linhas
+        for d, v in pld.items():
+            ax2.annotate(f"{v:.0f}", (d, v), textcoords="offset points", xytext=(0, 3), ha="center", fontsize=7.5, color="#555")
+        ax.set_zorder(ax2.get_zorder() + 1); ax.patch.set_visible(False)
+        h2, l2 = ax2.get_legend_handles_labels(); hs += h2; ls += l2
+    ax.legend(hs, ls, loc="upper left", frameon=True)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
     fig.savefig(arq, dpi=120); plt.close(fig)
@@ -251,6 +281,7 @@ def main():
     ap.add_argument("--deck"); ap.add_argument("--carga-csv"); ap.add_argument("--eolica-csv"); ap.add_argument("--renov-csv")
     ap.add_argument("--carga-prog-csv", help="teste: CSV no formato de fac_sintegre_carga_dessem_hourly")
     ap.add_argument("--carga-real-csv", help="teste: CSV no formato de fac_ons_carga")
+    ap.add_argument("--pld-csv", help="teste: CSV no formato de fac_ccee_pld_hourly")
     ap.add_argument("--realizado-csv"); ap.add_argument("--realizado-eolica-csv")
     a = ap.parse_args()
     t0 = time.time()
@@ -326,6 +357,22 @@ def main():
     tag = rod.strftime("%Y%m%d")
     sd.round(1).to_csv(OUTPUT_DIR / f"serie_diaria_{tag}.csv", sep=";", decimal=",", index=False, encoding="utf-8-sig")
 
+    # ---- PLD diário (média dos subsistemas) para o eixo auxiliar da ponta
+    pld_dia = None
+    if TABELA_PLD and a.subsistema == "SIN":
+        try:
+            pld_h = ler_pld(eng, ini, fim_prev, a.pld_csv)
+            if PLD_AGREGACAO == "ponta":
+                hp = sd[sd.subsistema == "SIN"].set_index("dia").hora_ponta
+                pld_dia = pd.Series({d: pld_h.get(pd.Timestamp(d) + pd.to_timedelta(hp[d] + ":00").floor("h"), float("nan"))
+                                     for d in hp.index}).dropna()
+            else:
+                pld_dia = pld_h.groupby(pld_h.index.normalize()).mean()
+            pld_dia = pld_dia[pld_dia.index >= ini]
+            print(f"PLD diário: {len(pld_dia)} dias ({pld_dia.index.min().date()} a {pld_dia.index.max().date()})", flush=True)
+        except Exception as e:
+            print(f"PLD indisponível ({e}); gráfico da ponta sem PLD", flush=True)
+
     # ---- gráficos enxutos: um por variável, estilo padrão da equipe
     x = sd[sd.subsistema == a.subsistema].set_index("dia")
     graficos = [
@@ -346,7 +393,8 @@ def main():
     sufixo = "" if a.subsistema == "SIN" else f"_{a.subsistema}"
     for col, titulo, fonte in graficos:
         grafico_enxuto(x, col, f"{titulo}  -  últimos {a.dias} dias" + ("" if a.subsistema == "SIN" else f"  -  {a.subsistema}"),
-                       fonte, rod, OUTPUT_DIR / f"{col}{sufixo}_{tag}.png")
+                       fonte + (" | PLD: fac_ccee_pld_hourly" if col == "carga_liquida_ponta" and pld_dia is not None else ""),
+                       rod, OUTPUT_DIR / f"{col}{sufixo}_{tag}.png", pld=pld_dia if col == "carga_liquida_ponta" else None)
 
     print(f"\n{len(x)} dias na série SIN ({x.index.min().date()} a {x.index.max().date()}) em {time.time()-t0:.0f}s")
     print(x[["carga_media", "carga_liquida_media", "carga_liquida_ponta", "hora_ponta", "origem"]].tail(14).round(0).to_string())
