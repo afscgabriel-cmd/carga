@@ -205,7 +205,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     ax.plot(prv.index, prv.values, color="#d62728", lw=2, ls="--", zorder=2)
     so_prev = prv.iloc[1:] if not pas.empty else prv
     ax.plot(so_prev.index, so_prev.values, color="#d62728", lw=0, marker="o", ms=6, zorder=3)
-    ax.plot([], [], color="#d62728", lw=2, ls="--", marker="o", ms=6, label="Previsao")
+    ax.plot([], [], color="#d62728", lw=2, ls="--", marker="o", ms=6, label="Previsão")
     ax.plot(pas.index, pas.values, color="#1f77b4", lw=2, marker="o", ms=6, label="Realizado", zorder=4)
     # sombra e divisória entre o último realizado e o primeiro previsto
     ini_prev = (pas.index.max() + pd.Timedelta(hours=12)) if not pas.empty else prv.index.min()
@@ -225,7 +225,7 @@ def grafico_enxuto(x: pd.DataFrame, col: str, titulo: str, fonte: str, rod, arq:
     fig.text(0.99, 0.965, f"Rodada de {rod.strftime('%d/%m/%Y')}", ha="right", fontsize=11, color="#555")
     fig.text(0.01, 0.01, f"Fonte: {fonte}", ha="left", fontsize=9.5, color="#555")
     h, l = ax.get_legend_handles_labels()
-    ordem = [l.index(k) for k in ["Realizado", "Realizado ONS", "Previsao"] if k in l]
+    ordem = [l.index(k) for k in ["Realizado", "Realizado ONS", "Previsão"] if k in l]
     ax.legend([h[i] for i in ordem], [l[i] for i in ordem], loc="upper left", frameon=True)
     ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0)); ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
     fig.autofmt_xdate(rotation=45); fig.tight_layout(rect=(0, 0.03, 1, 0.97))
@@ -330,23 +330,23 @@ def main():
     # ---- gráficos enxutos: um por variável, estilo padrão da equipe
     x = sd[sd.subsistema == a.subsistema].set_index("dia")
     graficos = [
-        ("carga_liquida_ponta", "Carga liquida  -  ponta diaria (maximo)", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
-        ("carga_liquida_media", "Carga liquida  -  media diaria", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
-        ("carga_liquida_min", "Carga liquida  -  minimo diario", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
-        ("carga_media", "Carga  -  media diaria", "prev_carga_dessem"),
-        ("eolica_media", "Geracao eolica  -  media diaria", "TEMPO OK"),
-        ("solar_media", "Geracao solar (UFV)  -  media diaria (24h)", "deck de previsao ONS"),
-        ("solar_media_diurna", "Geracao solar (UFV)  -  media diurna (horas com sol)", "deck de previsao ONS"),
-        ("solar_max", "Geracao solar (UFV)  -  maximo diario", "deck de previsao ONS"),
-        ("MGD_media", "MMGD  -  media diaria (24h)", "DESSEM"),
-        ("MGD_media_diurna", "MMGD  -  media diurna (horas com sol)", "DESSEM"),
-        ("UTE_media", "UTE biomassa  -  media diaria", "DESSEM"),
-        ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  media diaria", "DESSEM"),
+        ("carga_liquida_ponta", "Carga líquida  -  ponta diária (máximo)", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
+        ("carga_liquida_media", "Carga líquida  -  média diária", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
+        ("carga_liquida_min", "Carga líquida  -  mínimo diário", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
+        ("carga_media", "Carga  -  média diária", "prev_carga_dessem"),
+        ("eolica_media", "Geração eólica  -  média diária", "TEMPO OK"),
+        ("solar_media", "Geração solar (UFV)  -  média diária (24h)", "deck de previsão ONS"),
+        ("solar_media_diurna", "Geração solar (UFV)  -  média diurna (horas com sol)", "deck de previsão ONS"),
+        ("solar_max", "Geração solar (UFV)  -  máximo diário", "deck de previsão ONS"),
+        ("MGD_media", "MMGD  -  média diária (24h)", "DESSEM"),
+        ("MGD_media_diurna", "MMGD  -  média diurna (horas com sol)", "DESSEM"),
+        ("UTE_media", "UTE biomassa  -  média diária", "DESSEM"),
+        ("hidro_pequenas_media", "PCH + CGH + UHE pequenas  -  média diária", "DESSEM"),
     ]
     x["hidro_pequenas_media"] = x.PCH_media + x.CGH_media + x.UHE_media
     sufixo = "" if a.subsistema == "SIN" else f"_{a.subsistema}"
     for col, titulo, fonte in graficos:
-        grafico_enxuto(x, col, f"{titulo}  -  ultimos {a.dias} dias" + ("" if a.subsistema == "SIN" else f"  -  {a.subsistema}"),
+        grafico_enxuto(x, col, f"{titulo}  -  últimos {a.dias} dias" + ("" if a.subsistema == "SIN" else f"  -  {a.subsistema}"),
                        fonte, rod, OUTPUT_DIR / f"{col}{sufixo}_{tag}.png")
 
     print(f"\n{len(x)} dias na série SIN ({x.index.min().date()} a {x.index.max().date()}) em {time.time()-t0:.0f}s")
