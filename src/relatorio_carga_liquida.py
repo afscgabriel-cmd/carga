@@ -44,7 +44,7 @@ import validar_solar as vs
 OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "relatorio"
 # Realizado ONS (linha extra no passado). Carga: informe o nome da tabela (colunas subsistema, dia, hora, carga);
 # None = sem carga realizada (aí só solar e eólica ganham a linha de realizado).
-TABELA_CARGA_REALIZADA = None
+TABELA_CARGA_REALIZADA = "fac_ons_carga"
 TABELA_SOLAR_REALIZADA = "fac_ons_geracao_solar"
 TABELA_EOLICA_REALIZADA = "fac_ons_geracao_eolica"
 SUBS = ["SE", "S", "NE", "N", "SIN"]
@@ -336,10 +336,10 @@ def main():
     # ---- gráficos enxutos: um por variável, estilo padrão da equipe
     x = sd[sd.subsistema == a.subsistema].set_index("dia")
     graficos = [
-        ("carga_liquida_ponta", "Carga líquida  -  ponta diária (máximo)", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
-        ("carga_liquida_media", "Carga líquida  -  média diária", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
-        ("carga_liquida_min", "Carga líquida  -  mínimo diário", "prev_carga_dessem, TEMPO OK, deck ONS, DESSEM"),
-        ("carga_media", "Carga  -  média diária", "prev_carga_dessem"),
+        ("carga_liquida_ponta", "Carga líquida  -  ponta diária (máximo)", "programado: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM; realizado: fac_ons_carga, fac_ons_geracao_eolica/solar"),
+        ("carga_liquida_media", "Carga líquida  -  média diária", "programado: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM; realizado: fac_ons_carga, fac_ons_geracao_eolica/solar"),
+        ("carga_liquida_min", "Carga líquida  -  mínimo diário", "programado: prev_carga_dessem, TEMPO OK, deck ONS, DESSEM; realizado: fac_ons_carga, fac_ons_geracao_eolica/solar"),
+        ("carga_media", "Carga  -  média diária", "programado: prev_carga_dessem; realizado: fac_ons_carga"),
         ("eolica_media", "Geração eólica  -  média diária", "TEMPO OK"),
         ("solar_media", "Geração solar (UFV)  -  média diária (24h)", "deck de previsão ONS"),
         ("solar_media_diurna", "Geração solar (UFV)  -  média diurna (horas com sol)", "deck de previsão ONS"),
