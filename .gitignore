@@ -3,3 +3,4 @@ __pycache__/
 data/*.zip
 .venv/
 src/output/
+data/RESTRICAO_COFF_*
