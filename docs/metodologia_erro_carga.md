@@ -12,9 +12,12 @@ ficar y GW (z %) acima ou abaixo do oficial, com tal dispersão."
 | Oficial (alternativo) | `fac_ons_carga` | carga verificada |
 
 O oficial é definido em **um só lugar**: `OFICIAL` e `OFICIAIS` no topo do script, ou `--oficial deck|realizado`.
-Para o deck, o dia D usa a rodada com `dia - rodada = delta`. **delta = 0 é o oficial (confirmado)**: o deck feito
-na véspera para o próprio dia.
-Se faltar, usa a rodada anterior mais próxima, e o terminal avisa.
+Para o deck, o oficial do dia D é a linha com **delta = 0 (confirmado)**: o deck feito na véspera para o
+próprio dia. O dia e o delta vêm das colunas `dia` e `delta` da própria tabela. Se elas divergirem da conta
+`valido_para` / `dia - rodada`, o terminal avisa. Dia sem deck de delta 0 fica **fora** da análise. Antes, entrava
+o deck anterior, o que misturava decks; para voltar a esse comportamento, `usar_rodada_anterior=True`.
+
+Na previsão, se houver mais de uma rodada no mesmo dia, só a última entra.
 
 Histórico: 2022 até hoje. Feriados: `data/feriados_nacionais.csv` (ANBIMA, 2001-2099). A planilha de 2026
 enviada já trazia a série completa, então não precisa de mais anos.
@@ -31,7 +34,11 @@ enviada já trazia a série completa, então não precisa de mais anos.
    Antes disso, valores <= 0 ou fora de 30 % a 200 % da mediana do subsistema são descartados, com aviso.
    Linhas repetidas para o mesmo horário também geram aviso, e entra a média delas.
    Dias listados em `dias_excluidos.csv` (colunas `dia;motivo`, na pasta do script) saem da análise.
-5. **Checagem de alinhamento.** Calcula o MAE de D+1 deslocando o oficial em -1, 0 e +1 h. Se o mínimo não
+5. **Checagem de datas** (SIN, D+1). O MAE é calculado com o oficial deslocado em -1/0/+1 h e em -1/0/+1 dia, e
+   também a % de horas em que a previsão de D+1 é idêntica ao oficial. Como o operador parte dessa previsão, com
+   datas certas muitas horas saem iguais. Com datas desencontradas, quase nenhuma. Também é gerado `cobertura.csv`,
+   com os dias por ano x mês: rodadas da previsão, dias do oficial e dias pareados.
+6. **Checagem de alinhamento (antiga).** Calcula o MAE de D+1 deslocando o oficial em -1, 0 e +1 h. Se o mínimo não
    estiver em 0, a convenção de rótulo de alguma tabela está trocada. Ajuste em `rotulo_fim`.
 
 Erro = **previsto - oficial**. Positivo quer dizer previsão acima do oficial. O erro % é sobre o oficial.

@@ -88,7 +88,8 @@ PREV = dict(tabela="fac_sintegre_prev_carga_dessem", rodada="datarodada", tempo=
 OFICIAL = "deck"
 OFICIAIS = {
     "deck": dict(tabela="fac_sintegre_carga_dessem_hourly", rodada="rodada", tempo="valido_para",
-                 sub="subsystem", valor="demanda", col_dia="dia", delta=0, rotulo_fim=False),
+                 sub="subsystem", valor="demanda", col_dia="dia", col_delta="delta", delta=0, rotulo_fim=False,
+                 usar_rodada_anterior=False),   # True = sem deck de delta 0, usa o mais recente anterior
     "realizado": dict(tabela="fac_ons_carga", rotulo_fim=False),
 }
 
@@ -149,6 +150,13 @@ def _consulta_em_lotes(engine, sql, col_filtro, ini, fim, meses=3):
     return pd.concat(partes, ignore_index=True)
 
 
+def _colunas(engine, tabela):
+    from sqlalchemy import text
+    with engine.connect() as con:
+        return set(pd.read_sql(text("SELECT column_name FROM information_schema.columns WHERE table_name = :t"),
+                               con, params={"t": tabela}).column_name)
+
+
 def _subsistema(s):
     s = s.astype(str).str.strip().str.upper()
     return s.replace(NOMES_SUB)
@@ -200,8 +208,14 @@ def ler_previsao(engine, ini, fim, csv=None):
         d = _consulta_em_lotes(engine, f"SELECT {c['rodada']}, {c['tempo']}, {c['sub']}, {c['valor']} FROM {c['tabela']}",
                                c["rodada"], ini - pd.Timedelta(days=7), fim)
     d = d.rename(columns={c["rodada"]: "rodada", c["tempo"]: "valido_para", c["sub"]: "subsistema", c["valor"]: "mw"})
-    d["rodada"] = pd.to_datetime(d.rodada).dt.normalize()
-    d = d.drop_duplicates(["rodada", "valido_para", "subsistema"], keep="last")   # 1 rodada por dia
+    ts = pd.to_datetime(d.rodada)
+    d["rodada"] = ts.dt.normalize()
+    # 1 rodada por dia: se houver mais de um horário de rodada no mesmo dia, fica só o mais recente
+    ultima = ts.groupby(d.rodada).transform("max")
+    varias = d.loc[ts != ultima, "rodada"].nunique()
+    if varias:
+        print(f"AVISO previsão: {varias} dia(s) com mais de uma rodada -> usada a última de cada dia", flush=True)
+        d = d[ts == ultima]
     d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"], "previsão")
     d = _com_sin(d, ["rodada", "valido_para"])
     print(f"previsão: {d.rodada.nunique():,} rodadas ({d.rodada.min().date()} a {d.rodada.max().date()}), "
@@ -219,21 +233,44 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
         if csv:
             d = _ler_csv(csv)
         else:
-            d = _consulta_em_lotes(engine, f"SELECT {c['rodada']}, {c['tempo']}, {c['sub']}, {c['valor']} FROM {c['tabela']}",
-                                   c["col_dia"], ini, fim)
-        d = d.rename(columns={c["rodada"]: "rodada", c["tempo"]: "valido_para", c["sub"]: "subsistema", c["valor"]: "mw"})
+            cols = _colunas(engine, c["tabela"])
+            extra = [x for x in (c["col_dia"], c["col_delta"]) if x in cols]
+            d = _consulta_em_lotes(engine, f"SELECT {', '.join([c['rodada'], c['tempo'], c['sub'], c['valor']] + extra)} "
+                                           f"FROM {c['tabela']}", c["col_dia"], ini, fim)
+        d = d.rename(columns={c["rodada"]: "rodada", c["tempo"]: "valido_para", c["sub"]: "subsistema", c["valor"]: "mw",
+                              c["col_dia"]: "dia_tab", c["col_delta"]: "delta_tab"})
         d["rodada"] = pd.to_datetime(d.rodada).dt.normalize()
-        d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"], "oficial")
-        d["dia"] = d.valido_para.dt.normalize()
+        d["valido_para"] = pd.to_datetime(d.valido_para)
+        d["dia"] = (d.valido_para - pd.Timedelta(minutes=30 if c["rotulo_fim"] else 0)).dt.normalize()
         d["delta"] = (d.dia - d.rodada).dt.days
-        d = d[d.delta >= c["delta"]]
-        melhor = d.groupby(["dia", "subsistema"]).delta.transform("min")
-        d = d[d.delta == melhor]
-        atras = d[d.delta > c["delta"]].dia.drop_duplicates()
-        if len(atras):
-            print(f"oficial: {len(atras)} dia(s) sem deck com delta {c['delta']}, usada a rodada anterior "
-                  f"(ex.: {[x.date().isoformat() for x in atras[:5]]})", flush=True)
-        d = d.drop(columns=["rodada", "dia", "delta"])
+        # checagens de data: o dia e o delta da própria tabela batem com os calculados a partir de valido_para e rodada?
+        if "dia_tab" in d:
+            difere = pd.to_datetime(d.dia_tab).dt.normalize() != d.dia
+            if difere.any():
+                print(f"AVISO oficial: em {int(difere.sum()):,} linhas a coluna '{c['col_dia']}' difere da data de valido_para "
+                      f"(ex.: {d.loc[difere, ['dia_tab', 'valido_para']].head(3).astype(str).values.tolist()}) -> usada a "
+                      f"coluna '{c['col_dia']}' da tabela", flush=True)
+            d["dia"] = pd.to_datetime(d.dia_tab).dt.normalize()
+        if "delta_tab" in d:
+            dt = pd.to_numeric(d.delta_tab, errors="coerce")
+            difere = dt != (d.dia - d.rodada).dt.days
+            if difere.any():
+                print(f"AVISO oficial: em {int(difere.sum()):,} linhas a coluna '{c['col_delta']}' difere de dia - rodada "
+                      f"-> usada a coluna '{c['col_delta']}' da tabela", flush=True)
+            d["delta"] = dt
+        print(f"oficial: linhas por delta {d.delta.value_counts().sort_index().head(10).to_dict()}", flush=True)
+        dias_todos = set(d.dia)
+        if c["usar_rodada_anterior"]:
+            d = d[d.delta >= c["delta"]]
+            d = d[d.delta == d.groupby(["dia", "subsistema"]).delta.transform("min")]
+        else:
+            d = d[d.delta == c["delta"]]
+        sem = sorted(dias_todos - set(d.dia))
+        if sem:
+            print(f"oficial: {len(sem)} dia(s) sem deck de delta {c['delta']} -> fora da análise "
+                  f"(ex.: {[x.date().isoformat() for x in sem[:8]]})", flush=True)
+        d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"], "oficial")
+        d = d.drop(columns="rodada")
     d = _com_sin(d, ["valido_para"])
     print(f"oficial ({qual}): {d.valido_para.min().date()} a {d.valido_para.max().date()}, "
           f"subsistemas {sorted(d.subsistema.unique())} ({time.time()-t0:.0f}s)", flush=True)
@@ -497,16 +534,38 @@ def grafico_serie(anual, saida):
 
 
 # ------------------------------------------------------------------ checagens
-def checar_alinhamento(pares_d1):
-    """MAE de D+1 deslocando o oficial em -1, 0 e +1 h: se o mínimo não for 0, a convenção de rótulo está trocada."""
-    p = pares_d1[pares_d1.subsistema == "SIN"]
-    p = p.assign(t=p.dia + pd.to_timedelta(p.hora, unit="h"))
-    ofi = p.drop_duplicates("t").set_index("t").ofi
-    prev = p.drop_duplicates("t").set_index("t").prev
-    mae = {k: (prev - ofi.shift(k, freq="h")).abs().mean() for k in (-1, 0, 1)}
-    print("alinhamento (MAE SIN, D+1, oficial deslocado em h): " + ", ".join(f"{k:+d}h {v:,.0f} MW" for k, v in mae.items()), flush=True)
-    if min(mae, key=mae.get) != 0:
-        print("AVISO: o menor erro não está no deslocamento 0 -> conferir rotulo_fim em PREV/OFICIAIS", flush=True)
+def checar_alinhamento(prev, ofi):
+    """Confere se previsão e oficial estão casando no dia e na hora certos (SIN, D+1):
+    MAE deslocando o oficial em -1/0/+1 h e em -1/0/+1 dia, e % de horas idênticas (o operador parte da previsão
+    de D+1; se as datas estiverem certas, muitas horas saem iguais)."""
+    p = prev[prev.subsistema == "SIN"]
+    p = p[(p.valido_para.dt.normalize() - p.rodada).dt.days == 1].set_index("valido_para").mw
+    o = ofi[ofi.subsistema == "SIN"].set_index("valido_para").mw
+    mae_h = {k: (p - o.shift(k, freq="h")).abs().mean() for k in (-1, 0, 1)}
+    mae_d = {k: (p - o.shift(k, freq="D")).abs().mean() for k in (-1, 0, 1)}
+    iguais = {k: 100 * ((p - o.shift(k, freq="D")).abs() < 1).mean() for k in (-1, 0, 1)}
+    print("alinhamento SIN D+1, oficial deslocado em horas: " + ", ".join(f"{k:+d}h {v:,.0f} MW" for k, v in mae_h.items()), flush=True)
+    print("alinhamento SIN D+1, oficial deslocado em dias:  " + ", ".join(f"{k:+d}d {v:,.0f} MW" for k, v in mae_d.items()), flush=True)
+    print("horas com previsão D+1 = oficial (dif < 1 MW):   " + ", ".join(f"{k:+d}d {v:.0f} %" for k, v in iguais.items()), flush=True)
+    if min(mae_h, key=mae_h.get) != 0:
+        print("AVISO: o menor erro não está no deslocamento 0 h -> conferir rotulo_fim em PREV/OFICIAIS", flush=True)
+    if min(mae_d, key=mae_d.get) != 0:
+        print("AVISO: o menor erro não está no deslocamento 0 dia -> as datas de rodada/dia estão desencontradas", flush=True)
+
+
+def cobertura(prev, ofi, diario, saida):
+    """Dias com dado por ano x mês: rodadas da previsão, dias do oficial e dias pareados completos (SIN, D+1)."""
+    c = pd.DataFrame({
+        "rodadas_prev": prev.groupby(prev.rodada.dt.to_period("M")).rodada.nunique(),
+        "dias_oficial": ofi.groupby(ofi.valido_para.dt.to_period("M")).valido_para.apply(lambda v: v.dt.normalize().nunique()),
+        "dias_pareados_d1": diario[(diario.h == 1) & (diario.subsistema == "SIN")].groupby(
+            diario.dia.dt.to_period("M")).dia.nunique()}).fillna(0).astype(int)
+    c.index.name = "mes"
+    _salvar(c.reset_index().astype({"mes": str}), "cobertura.csv", saida)
+    t = c.dias_pareados_d1.copy()
+    t.index = pd.MultiIndex.from_arrays([t.index.year, t.index.month], names=["ano", "mes"])
+    print("\ncobertura: dias pareados completos (SIN, D+1) por ano x mês  [detalhe em cobertura.csv]")
+    print(t.unstack().reindex(columns=range(1, 13)).fillna(0).astype(int).rename(columns=dict(enumerate(MESES, 1))).to_string())
 
 
 def _salvar(df, nome, saida):
@@ -742,12 +801,13 @@ def main():
     pares = montar_pares(prev, ofi)
     pares = pares[(pares.dia >= ini) & (pares.dia <= fim)]
     print(f"pares horários: {len(pares):,} ({pares.dia.min().date()} a {pares.dia.max().date()})", flush=True)
-    checar_alinhamento(pares[pares.h == 1])
+    checar_alinhamento(prev, ofi)
 
     feriados = ler_feriados()
     pares = excluir_dias(pares)
     diario = erro_diario(pares, feriados)
     longo = longo_diario(diario)
+    cobertura(prev, ofi, diario, saida)
     normais = longo[longo.tipo_dia.isin(TIPOS_NORMAIS)]
     print(f"dias por tipo (D+1, SIN): {diario[(diario.h == 1) & (diario.subsistema == 'SIN')].tipo_dia.value_counts().to_dict()}",
           flush=True)
