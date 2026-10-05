@@ -22,7 +22,9 @@ Uso:
     python erro_carga.py --ini 2024-01-01 --oficial realizado
     python erro_carga.py --prev-csv prev.csv --oficial-csv oficial.csv   # teste sem banco
 
-Saídas em src/output/erro_carga/ (CSV ; e decimal ,; valores em MW):
+Arquivos: só este script e feriados_nacionais.csv (mesma pasta, ou ../data). Banco: CONFIG_PATH.
+
+Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; valores em MW):
     pares_horarios.csv.gz      base hora a hora (rodada, dia, hora, subsistema, h, prev, ofi)
     erro_diario.csv            uma linha por rodada x dia x subsistema (média, ponta, hora da ponta)
     resumo_mes_horizonte.csv   métrica x subsistema x mês x h            (dias normais)
@@ -37,9 +39,10 @@ Saídas em src/output/erro_carga/ (CSV ; e decimal ,; valores em MW):
     *.png                      gráficos
 """
 import argparse
-import sys
+import json
 import time
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import matplotlib
 
@@ -49,10 +52,13 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "erro_carga"
-FERIADOS_CSV = Path(__file__).resolve().parent.parent / "data" / "feriados_nacionais.csv"
+PASTA = Path(__file__).resolve().parent
+OUTPUT_DIR = PASTA / "output" / "erro_carga"
+# feriados_nacionais.csv: na mesma pasta do script ou em ../data (estrutura do repositório)
+FERIADOS_CSV = next((p for p in [PASTA / "feriados_nacionais.csv", PASTA.parent / "data" / "feriados_nacionais.csv"]
+                     if p.exists()), PASTA / "feriados_nacionais.csv")
+CONFIG_PATH = Path(r"C:\Users\afons\OneDrive - Central Energia\ATUALIZAR\database_config.json")   # acesso ao banco
 INICIO = "2022-01-01"
 HORIZONTES = range(1, 8)                 # D+1 a D+7
 SUBS = ["SE", "S", "NE", "N", "SIN"]
@@ -85,6 +91,35 @@ MESES = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "
 
 
 # ------------------------------------------------------------------ leitura
+def engine_banco():
+    from sqlalchemy import create_engine
+    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return create_engine(
+        f"postgresql+psycopg2://{quote_plus(cfg['POSTGRES_USERNAME'])}:{quote_plus(cfg['POSTGRES_PASSWORD'])}@"
+        f"{cfg['postgres_host']}:{cfg['postgres_port']}/{cfg['postgres_database']}"
+    )
+
+
+def ler_realizado(engine, ini, fim, tabela, csv=None):
+    """Carga verificada (colunas subsistema, dia, hora, carga) -> valido_para, subsistema, mw."""
+    if csv:
+        d = pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8", thousands=".")
+    else:
+        from sqlalchemy import text
+        with engine.connect() as con:
+            con.execute(text("SET statement_timeout = '600s'"))
+            d = pd.read_sql(text(f"""SELECT subsistema, dia, hora, carga FROM {tabela}
+                                     WHERE dia >= :ini AND dia <= :fim"""), con, params={"ini": ini, "fim": fim})
+    d["valido_para"] = pd.to_datetime(d.dia.astype(str)) + pd.to_timedelta(d.hora.astype(str))
+    d["mw"] = pd.to_numeric(d.carga, errors="coerce")
+    d["subsistema"] = d.subsistema.astype(str).str.strip()
+    ruim = d.mw > 60000                       # valores implausíveis
+    if ruim.any():
+        print(f"AVISO {tabela}: {int(ruim.sum())} valores acima de 60000 MW descartados", flush=True)
+        d = d[~ruim]
+    return d[["valido_para", "subsistema", "mw"]]
+
+
 def _ler_csv(csv):
     return pd.read_csv(csv, sep=";", decimal=",", encoding="utf-8-sig")
 
@@ -153,8 +188,7 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
     c = OFICIAIS[qual]
     t0 = time.time()
     if qual == "realizado":
-        import validar_solar as vs
-        d = vs.ler_realizado(engine, csv, ini.date(), fim.date(), tabela=c["tabela"])
+        d = ler_realizado(engine, ini.date(), fim.date(), c["tabela"], csv)
         d = _horario(d.copy(), c["rotulo_fim"])
     else:
         if csv:
@@ -503,8 +537,7 @@ def main():
     saida.mkdir(parents=True, exist_ok=True)
     eng = None
     if not (a.prev_csv and a.oficial_csv):
-        import gerar_renovaveis as gr
-        eng = gr.engine_banco()
+        eng = engine_banco()
 
     prev = ler_previsao(eng, ini, fim, a.prev_csv)
     ofi = ler_oficial(eng, ini, fim, a.oficial_csv, a.oficial)
