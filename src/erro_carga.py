@@ -259,6 +259,11 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
                       f"-> usada a coluna '{c['col_delta']}' da tabela", flush=True)
             d["delta"] = dt
         print(f"oficial: linhas por delta {d.delta.value_counts().sort_index().head(10).to_dict()}", flush=True)
+        d1 = d[d.delta == 1]                       # deck da véspera para o dia seguinte (só para checar_cadeia)
+        delta1 = None
+        if len(d1):
+            delta1 = _com_sin(_horario(d1[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"],
+                                       "deck delta 1").drop(columns="rodada"), ["valido_para"])
         dias_todos = set(d.dia)
         if c["usar_rodada_anterior"]:
             d = d[d.delta >= c["delta"]]
@@ -274,6 +279,8 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
     d = _com_sin(d, ["valido_para"])
     print(f"oficial ({qual}): {d.valido_para.min().date()} a {d.valido_para.max().date()}, "
           f"subsistemas {sorted(d.subsistema.unique())} ({time.time()-t0:.0f}s)", flush=True)
+    if qual != "realizado":
+        d.attrs["delta1"] = delta1
     return d
 
 
@@ -553,6 +560,34 @@ def checar_alinhamento(prev, ofi):
         print("AVISO: o menor erro não está no deslocamento 0 dia -> as datas de rodada/dia estão desencontradas", flush=True)
 
 
+def checar_cadeia(prev, ofi, delta1):
+    """De onde vem o oficial? Compara, para o mesmo dia alvo (SIN): A) previsão D+1 x deck delta 0,
+    B) deck delta 1 x deck delta 0, C) previsão D+1 x deck delta 1. Mostra quanto cada par coincide."""
+    p1 = prev[(prev.subsistema == "SIN") & ((prev.valido_para.dt.normalize() - prev.rodada).dt.days == 1)]
+    series = {"previsão D+1": p1.set_index("valido_para").mw,
+              "deck delta 0": ofi[ofi.subsistema == "SIN"].set_index("valido_para").mw}
+    if delta1 is not None:
+        series["deck delta 1"] = delta1[delta1.subsistema == "SIN"].set_index("valido_para").mw
+    pares = [("A", "previsão D+1", "deck delta 0"), ("B", "deck delta 1", "deck delta 0"), ("C", "previsão D+1", "deck delta 1")]
+    print("\nDE ONDE VEM O OFICIAL (SIN, mesmo dia alvo; 'igual' = diferença < 1 MW na hora, < 10 MW na média do dia)")
+    print(f"{'':4}{'comparação':34}{'dias':>6}{'MAE h':>9}{'horas iguais':>14}{'dias c/ média igual':>21}{'dias 24h iguais':>17}")
+    for k, a, b in pares:
+        if a not in series or b not in series:
+            print(f"{k:4}{a + ' x ' + b:34}  sem dado")
+            continue
+        x = pd.concat([series[a].rename("a"), series[b].rename("b")], axis=1, join="inner")
+        if x.empty:
+            print(f"{k:4}{a + ' x ' + b:34}  sem dias em comum")
+            continue
+        dif = (x.a - x.b).abs()
+        dia = dif.groupby(dif.index.normalize())
+        med = (x.a - x.b).groupby(x.index.normalize()).mean().abs()
+        print(f"{k:4}{a + ' x ' + b:34}{dia.ngroups:>6}{dif.mean():>9,.0f}{100 * (dif < 1).mean():>13.0f}%"
+              f"{100 * (med < 10).mean():>20.0f}%{100 * (dia.max() < 1).mean():>16.0f}%")
+    print("Leitura: A alto e C baixo -> o operador parte da previsão da manhã; A, B e C altos -> o mesmo número circula;"
+          " A ~100 % idêntico em todas as horas -> suspeitar que a previsão foi sobrescrita pelo oficial.")
+
+
 def cobertura(prev, ofi, diario, saida):
     """Dias com dado por ano x mês: rodadas da previsão, dias do oficial e dias pareados completos (SIN, D+1)."""
     c = pd.DataFrame({
@@ -802,6 +837,8 @@ def main():
     pares = pares[(pares.dia >= ini) & (pares.dia <= fim)]
     print(f"pares horários: {len(pares):,} ({pares.dia.min().date()} a {pares.dia.max().date()})", flush=True)
     checar_alinhamento(prev, ofi)
+    if a.oficial == "deck":
+        checar_cadeia(prev, ofi, ofi.attrs.get("delta1"))
 
     feriados = ler_feriados()
     pares = excluir_dias(pares)
