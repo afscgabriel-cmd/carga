@@ -30,7 +30,8 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     erro_diario.csv            uma linha por rodada x dia x subsistema (média, ponta, hora da ponta)
     resumo_mes_horizonte.csv   métrica x subsistema x mês x h            (dias normais)
     relatorio_gw.csv           LEITURA DIRETA EM GW: histórico, mês (--mes) e janela de dias (--dias): erro médio e mediano,
-                               viés, faixa de 80 % dos dias, pior erro; + relatorio_gw_<sub>.png
+                               viés com IC 95 % e se o zero está dentro/fora dele, faixa de 80 % dos dias,
+                               pior erro; + relatorio_gw_<sub>.png
     piores_dias.csv            30 maiores erros por métrica e subsistema, com o erro de cada subsistema ao lado
                                (para achar dado ruim; dias a descartar vão em dias_excluidos.csv: dia;motivo)
     quadro_agregado.csv        TODO O HISTÓRICO por antecedência, em GW e %: viés, IC, desvio, MAPE, faixa P5-P95
@@ -70,6 +71,7 @@ SUBS = ["SE", "S", "NE", "N", "SIN"]
 NOMES_SUB = {"SUDESTE": "SE", "SE/CO": "SE", "SECO": "SE", "SUL": "S", "NORDESTE": "NE", "NORTE": "N"}
 LIMITES_PLAUSIVEIS = (0.3, 2.0)           # hora descartada se <= 30 % ou >= 200 % da mediana do subsistema
 DIAS_EXCLUIDOS_CSV = PASTA / "dias_excluidos.csv"   # opcional: colunas dia;motivo (dias alvo fora da análise)
+MIN_SEMANAS_IC = 8                        # abaixo disso o IC do bootstrap fica estreito demais: marcado com *
 N_BOOT = 500                              # reamostragens do bootstrap em blocos semanais
 QUANTIS = [0.05, 0.25, 0.50, 0.75, 0.95]
 
@@ -564,6 +566,15 @@ def tabela_gw(x):
                       "p10_gw": g.quantile(0.10) / 1000, "p90_gw": g.quantile(0.90) / 1000,
                       "pior_abaixo_gw": g.min() / 1000, "pior_acima_gw": g.max() / 1000,
                       "mape": x.groupby(["metrica", "subsistema", "h"]).erro_pct.apply(lambda e: e.abs().mean())})
+    rng = np.random.default_rng(0)
+    ic = x.groupby(["metrica", "subsistema", "h"]).apply(
+        lambda c: pd.Series(_ic_bootstrap(c, rng), index=["vies_ic95_inf_gw", "vies_ic95_sup_gw"]), include_groups=False) / 1000
+    t = t.join(ic)
+    t["n_semanas"] = x.groupby(["metrica", "subsistema", "h"]).semana.nunique()
+    zero_dentro = (t.vies_ic95_inf_gw <= 0) & (t.vies_ic95_sup_gw >= 0)
+    t["zero_no_ic"] = np.where(t.vies_ic95_inf_gw.isna(), "sem IC", np.where(zero_dentro, "dentro", "fora"))
+    t["vies_significativo"] = np.where(t.zero_no_ic == "fora", "sim", "não")
+    t["ic_fragil"] = t.n_semanas < MIN_SEMANAS_IC
     return t.reset_index()
 
 
@@ -583,6 +594,8 @@ def relatorio_gw(longo, mes, dias, saida, sub="SIN"):
     print("  erro mediano = mediana do erro sem sinal: metade dos dias erra menos que isso; não sente os extremos")
     print("  viés         = média com sinal (para que lado costuma errar)")
     print("  80 % dos dias = entre P10 e P90;   pior = maior erro observado para cada lado")
+    print("  IC 95 % do viés (bootstrap por semanas). Zero FORA do IC -> viés real (vale corrigir: previsão / (1 + viés));"
+          " zero DENTRO -> não se distingue de ruído (tratar viés como 0)")
     for chave, (rotulo, _) in recs.items():
         t = tab[(tab.recorte == chave) & (tab.subsistema == sub)]
         if t.empty:
@@ -591,10 +604,16 @@ def relatorio_gw(longo, mes, dias, saida, sub="SIN"):
             tm = t[t.metrica == m]
             print(f"\n{rotulo}  -  {'média diária' if m == 'media' else 'ponta diária'}"
                   f"  ({tm.n_dias.min()}-{tm.n_dias.max()} dias, {tm.n_anos.max()} anos)")
-            print(f"{'':>5}{'erro médio':>12}{'mediano':>9}{'viés':>8}{'80 % dos dias':>20}{'pior abaixo':>13}{'pior acima':>12}")
+            print(f"{'':>5}{'erro médio':>12}{'mediano':>9}{'viés':>8}{'IC 95 % do viés':>18}{'zero no IC':>12}"
+                  f"{'80 % dos dias':>18}{'pior abaixo':>13}{'pior acima':>12}")
             for _, z in tm.iterrows():
-                print(f"{'D+'+str(z.h):>5}{z.erro_medio_gw:>9.2f} GW{z.erro_mediano_gw:>9.2f}{z.vies_gw:>+8.2f}"
-                      f"{f'{z.p10_gw:+.2f} a {z.p90_gw:+.2f}':>20}{z.pior_abaixo_gw:>+13.2f}{z.pior_acima_gw:>+12.2f}")
+                ic = f"{z.vies_ic95_inf_gw:+.2f} a {z.vies_ic95_sup_gw:+.2f}" if pd.notna(z.vies_ic95_inf_gw) else "-"
+                print(f"{'D+'+str(z.h):>5}{z.erro_medio_gw:>9.2f} GW{z.erro_mediano_gw:>9.2f}{z.vies_gw:>+8.2f}{ic:>18}"
+                      f"{z.zero_no_ic + ('*' if z.ic_fragil else ''):>12}{f'{z.p10_gw:+.2f} a {z.p90_gw:+.2f}':>18}{z.pior_abaixo_gw:>+13.2f}"
+                      f"{z.pior_acima_gw:>+12.2f}")
+    if tab[tab.subsistema == sub].ic_fragil.any():
+        print(f"\n* IC frágil: menos de {MIN_SEMANAS_IC} semanas na amostra; o bootstrap sai estreito demais. Confirmar o"
+              " sinal na tabela ano a ano abaixo (o viés precisa ter o mesmo sinal na maioria dos anos).")
     if "janela" in recs:
         rotulo, x = recs["janela"]
         x = x[x.subsistema == sub]
@@ -622,7 +641,12 @@ def grafico_gw(tab, recs, saida, sub):
             t = tab[(tab.recorte == k) & (tab.metrica == m) & (tab.subsistema == sub)].sort_values("h")
             ax = axs[i, j]
             ax.fill_between(t.h, t.p10_gw, t.p90_gw, color=cor, alpha=0.22, lw=0, label="80 % dos dias (P10-P90)")
-            ax.plot(t.h, t.vies_gw, color=cor, lw=2, marker="o", ms=4, label="viés (média com sinal)")
+            ax.plot(t.h, t.vies_gw, color=cor, lw=2, label="viés (média com sinal)")
+            ax.errorbar(t.h, t.vies_gw, yerr=[t.vies_gw - t.vies_ic95_inf_gw, t.vies_ic95_sup_gw - t.vies_gw],
+                        fmt="none", ecolor=cor, elinewidth=1.2, capsize=3, label="IC 95 % do viés")
+            sig = t.zero_no_ic == "fora"
+            ax.plot(t.h[sig], t.vies_gw[sig], "o", ms=6, color=cor, label="viés real (zero fora do IC)")
+            ax.plot(t.h[~sig], t.vies_gw[~sig], "o", ms=6, mfc="white", mec=cor, mew=1.5, label="não distinguível de 0")
             ax.axhline(0, color="#52514e", lw=0.8)
             for _, z in t.iterrows():
                 ax.annotate(f"±{z.erro_medio_gw:.1f}", (z.h, z.p90_gw), textcoords="offset points", xytext=(0, 4),
