@@ -26,7 +26,10 @@ Saídas em src/output/erro_carga/ (CSV ; e decimal ,; valores em MW):
     pares_horarios.csv.gz      base hora a hora (rodada, dia, hora, subsistema, h, prev, ofi)
     erro_diario.csv            uma linha por rodada x dia x subsistema (média, ponta, hora da ponta)
     resumo_mes_horizonte.csv   métrica x subsistema x mês x h            (dias normais)
-    resumo_horizonte.csv       métrica x subsistema x h                  (dias normais, todos os meses)
+    quadro_agregado.csv        TODO O HISTÓRICO por antecedência, em GW e %: viés, IC, desvio, MAPE, faixa P5-P95
+                               (dias normais e todos os dias, inclusive feriados)
+    resumo_horizonte.csv       métrica x subsistema x h                  (dias normais, todos os meses, em MW)
+    resumo_horizonte_todos_dias.csv   idem, com feriados, pontes e dias especiais
     resumo_tipo_dia.csv        métrica x subsistema x tipo de dia x h
     resumo_ano_mes.csv         viés por ano e mês (procura de quebras: mudança de modelo, de metodologia...)
     perfil_hora.csv            subsistema x h x hora                    (erro horário e de formato)
@@ -65,7 +68,7 @@ PREV = dict(tabela="fac_sintegre_prev_carga_dessem", rodada="datarodada", tempo=
 # ------------------------------------------------------------------ o que é o "oficial"
 # "deck"      carga do deck DESSEM: ajuste do operador publicado na tarde de D-1, a que entra em vigor.
 #             rodada do deck = primeiro dia que ele cobre; para cada dia usa delta = dia - rodada = DELTA
-#             (0 = deck feito na véspera para o próprio dia). Sem esse deck, usa a rodada anterior mais próxima.
+#             (0 = deck feito na véspera para o próprio dia; confirmado como o oficial). Sem esse deck, usa a rodada anterior mais próxima.
 # "realizado" carga verificada (tempo real ONS), colunas subsistema, dia, hora, carga.
 OFICIAL = "deck"
 OFICIAIS = {
@@ -451,13 +454,36 @@ def _salvar(df, nome, saida):
     df.to_csv(saida / nome, sep=";", decimal=",", index=False, encoding="utf-8-sig", float_format="%.3f")
 
 
-def imprimir_resumo(res):
-    r = res[(res.subsistema == "SIN")].set_index(["metrica", "h"])
-    print("\nSIN, dias normais (viés = previsto - oficial):")
-    print(f"{'':8}{'h':>4}{'viés MW':>10}{'viés %':>8}{'desvio %':>10}{'MAPE':>7}{'P5 MW':>9}{'P95 MW':>9}")
-    for (m, h), x in r.iterrows():
-        print(f"{m:8}{'D+'+str(h):>4}{x.vies_mw:>10,.0f}{x.vies_pct:>8.2f}{x.desvio_pct:>10.2f}{x.mape:>7.2f}"
-              f"{x.p05_mw:>9,.0f}{x.p95_mw:>9,.0f}")
+def quadro_agregado(res_normais, res_todos):
+    """Todo o histórico, por antecedência, em GW e %: a resposta direta 'em D+x erra y GW, com tal dispersão'."""
+    partes = []
+    for dias, r in [("normais", res_normais), ("todos", res_todos)]:
+        q = r[["metrica", "subsistema", "h", "n"]].copy()
+        q.insert(0, "dias", dias)
+        q["vies_gw"] = r.vies_mw / 1000
+        q["vies_ic95_inf_gw"], q["vies_ic95_sup_gw"] = r.vies_ic95_inf_mw / 1000, r.vies_ic95_sup_mw / 1000
+        q["vies_pct"] = r.vies_pct
+        q["desvio_gw"], q["desvio_pct"] = r.desvio_mw / 1000, r.desvio_pct
+        q["mae_gw"], q["mape"] = r.mae_mw / 1000, r.mape
+        for c in ["p05", "p25", "p50", "p75", "p95"]:
+            q[f"{c}_gw"] = r[f"{c}_mw"] / 1000
+        q["p05_pct"], q["p95_pct"] = r.p05_pct, r.p95_pct
+        partes.append(q)
+    q = pd.concat(partes, ignore_index=True)
+    q["subsistema"] = pd.Categorical(q.subsistema, SUBS, ordered=True)
+    return q.sort_values(["dias", "metrica", "subsistema", "h"])
+
+
+def imprimir_resumo(quadro, dias="normais"):
+    print(f"\nTodo o histórico, dias {dias} (viés = previsto - oficial; faixa = P5 a P95):")
+    for m in ["media", "ponta"]:
+        for s in SUBS:
+            r = quadro[(quadro.dias == dias) & (quadro.metrica == m) & (quadro.subsistema == s)]
+            print(f"\n{s} - {m}")
+            print(f"{'h':>5}{'n':>6}{'viés GW':>9}{'viés %':>8}{'desvio GW':>11}{'desvio %':>10}{'MAPE':>7}{'faixa GW':>18}")
+            for _, x in r.iterrows():
+                print(f"{'D+'+str(x.h):>5}{x.n:>6}{x.vies_gw:>9.2f}{x.vies_pct:>8.2f}{x.desvio_gw:>11.2f}{x.desvio_pct:>10.2f}"
+                      f"{x.mape:>7.2f}{f'{x.p05_gw:+.2f} a {x.p95_gw:+.2f}':>18}")
 
 
 # ------------------------------------------------------------------ principal
@@ -496,6 +522,7 @@ def main():
 
     t0 = time.time()
     res_h = resumir(normais, ["metrica", "subsistema", "h"])
+    res_h_todos = resumir(longo, ["metrica", "subsistema", "h"])
     res_mh = resumir(normais, ["metrica", "subsistema", "mes", "h"])
     res_tipo = resumir(longo, ["metrica", "subsistema", "tipo_dia", "h"])
     res_ano = resumir(normais, ["metrica", "subsistema", "ano", "mes", "h"], boot=False)
@@ -512,6 +539,9 @@ def main():
 
     pares.to_csv(saida / "pares_horarios.csv.gz", sep=";", decimal=",", index=False, float_format="%.1f")
     _salvar(diario, "erro_diario.csv", saida)
+    quadro = quadro_agregado(res_h, res_h_todos)
+    _salvar(quadro, "quadro_agregado.csv", saida)
+    _salvar(res_h_todos, "resumo_horizonte_todos_dias.csv", saida)
     for df, nome in [(res_mh, "resumo_mes_horizonte.csv"), (res_h, "resumo_horizonte.csv"),
                      (res_tipo, "resumo_tipo_dia.csv"), (res_ano, "resumo_ano_mes.csv"),
                      (perf_h, "perfil_hora.csv"), (perf_mh, "perfil_mes_hora.csv")]:
@@ -522,7 +552,8 @@ def main():
     grafico_leque(res_h, saida)
     grafico_perfil(perf_h, saida)
     grafico_serie(res_ano, saida)
-    imprimir_resumo(res_h)
+    imprimir_resumo(quadro, "normais")
+    imprimir_resumo(quadro, "todos")
     print(f"\nsaídas em {saida}", flush=True)
 
 

@@ -12,7 +12,8 @@ ficar y GW (z %) acima ou abaixo do oficial, com tal dispersão."
 | Oficial (alternativo) | `fac_ons_carga` | carga verificada |
 
 O oficial é definido em **um só lugar**: `OFICIAL` e `OFICIAIS` no topo do script, ou `--oficial deck|realizado`.
-Para o deck, o dia D usa a rodada com `dia - rodada = delta` (padrão 0 = deck da véspera para o próprio dia).
+Para o deck, o dia D usa a rodada com `dia - rodada = delta`. **delta = 0 é o oficial (confirmado)**: o deck feito
+na véspera para o próprio dia.
 Se faltar, usa a rodada anterior mais próxima, e o terminal avisa.
 
 Histórico: 2022 até hoje. Feriados: `data/feriados_nacionais.csv` (ANBIMA, 2001-2099). A planilha de 2026
@@ -77,8 +78,10 @@ indica mudança de modelo ou de metodologia da carga. Nesse caso, restrinja o pe
 
 | Arquivo | Conteúdo |
 |---|---|
+| `quadro_agregado.csv` | **todo o histórico** por antecedência, em GW e %: viés e IC, desvio, MAE, MAPE, faixa P5-P95; dias normais e todos os dias |
 | `resumo_mes_horizonte.csv` | tabela principal: métrica x subsistema x mês x h |
 | `resumo_horizonte.csv` | idem, todos os meses; acerto da hora da ponta |
+| `resumo_horizonte_todos_dias.csv` | idem, com feriados, pontes e dias especiais |
 | `resumo_tipo_dia.csv` | por tipo de dia (inclui feriado, ponte, especial) |
 | `resumo_ano_mes.csv` | viés por ano e mês |
 | `perfil_hora.csv`, `perfil_mes_hora.csv` | erro horário e de formato |
