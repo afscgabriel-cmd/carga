@@ -21,6 +21,7 @@ Uso:
     python erro_carga.py                                  # banco, histórico desde INICIO
     python erro_carga.py --ini 2024-01-01 --oficial realizado
     python erro_carga.py --prev-csv prev.csv --oficial-csv oficial.csv   # teste sem banco
+    python erro_carga.py --so-relatorio --mes 10 --dias 8-14   # só o relatório em GW, sem banco (usa erro_diario.csv)
 
 Arquivos: só este script e feriados_nacionais.csv (mesma pasta, ou ../data). Banco: CONFIG_PATH.
 
@@ -28,6 +29,8 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     pares_horarios.csv.gz      base hora a hora (rodada, dia, hora, subsistema, h, prev, ofi)
     erro_diario.csv            uma linha por rodada x dia x subsistema (média, ponta, hora da ponta)
     resumo_mes_horizonte.csv   métrica x subsistema x mês x h            (dias normais)
+    relatorio_gw.csv           LEITURA DIRETA EM GW: histórico, mês (--mes) e janela de dias (--dias): erro típico,
+                               viés, faixa de 80 % dos dias, pior erro; + relatorio_gw_<sub>.png
     quadro_agregado.csv        TODO O HISTÓRICO por antecedência, em GW e %: viés, IC, desvio, MAPE, faixa P5-P95
                                (dias normais e todos os dias, inclusive feriados)
     resumo_horizonte.csv       métrica x subsistema x h                  (dias normais, todos os meses, em MW)
@@ -520,6 +523,106 @@ def imprimir_resumo(quadro, dias="normais"):
                       f"{x.mape:>7.2f}{f'{x.p05_gw:+.2f} a {x.p95_gw:+.2f}':>18}")
 
 
+# ------------------------------------------------------------------ relatório em GW (leitura direta)
+def recortes_gw(longo, mes, dias):
+    """Todo o histórico, o mês escolhido e uma janela de dias desse mês (todos os anos). Todos os tipos de dia."""
+    nome_mes = MESES[mes - 1]
+    r = {"historico": ("todo o histórico", longo), "mes": (f"{nome_mes} (todos os anos)", longo[longo.mes == mes])}
+    if dias:
+        d1, d2 = dias
+        j = longo[(longo.mes == mes) & longo.dia.dt.day.between(d1, d2)]
+        r["janela"] = (f"{d1} a {d2}/{nome_mes} (todos os anos)", j)
+    return r
+
+
+def tabela_gw(x):
+    g = x.groupby(["metrica", "subsistema", "h"]).erro_mw
+    t = pd.DataFrame({"n_dias": g.size(), "n_anos": x.groupby(["metrica", "subsistema", "h"]).ano.nunique(),
+                      "erro_tipico_gw": g.apply(lambda e: e.abs().mean()) / 1000,
+                      "vies_gw": g.mean() / 1000,
+                      "p10_gw": g.quantile(0.10) / 1000, "p90_gw": g.quantile(0.90) / 1000,
+                      "pior_abaixo_gw": g.min() / 1000, "pior_acima_gw": g.max() / 1000,
+                      "mape": x.groupby(["metrica", "subsistema", "h"]).erro_pct.apply(lambda e: e.abs().mean())})
+    return t.reset_index()
+
+
+def relatorio_gw(longo, mes, dias, saida, sub="SIN"):
+    recs = recortes_gw(longo, mes, dias)
+    tabs = []
+    for chave, (rotulo, x) in recs.items():
+        if len(x):
+            tabs.append(tabela_gw(x).assign(recorte=chave, descricao=rotulo))
+    tab = pd.concat(tabs, ignore_index=True)
+    tab = tab[["recorte", "descricao"] + [c for c in tab.columns if c not in ("recorte", "descricao")]]
+    _salvar(tab, "relatorio_gw.csv", saida)
+
+    print("\n" + "=" * 96)
+    print(f"QUANTO O MODELO ERRA, EM GW  -  {sub}  (erro = previsto - oficial; negativo = previsão abaixo do oficial)")
+    print("  erro típico = média do erro sem sinal (quanto erra, para cima ou para baixo)")
+    print("  viés        = média com sinal (para que lado costuma errar)")
+    print("  80 % dos dias = entre P10 e P90;   pior = maior erro observado para cada lado")
+    for chave, (rotulo, _) in recs.items():
+        t = tab[(tab.recorte == chave) & (tab.subsistema == sub)]
+        if t.empty:
+            continue
+        for m in ["media", "ponta"]:
+            tm = t[t.metrica == m]
+            print(f"\n{rotulo}  -  {'média diária' if m == 'media' else 'ponta diária'}"
+                  f"  ({tm.n_dias.min()}-{tm.n_dias.max()} dias, {tm.n_anos.max()} anos)")
+            print(f"{'':>5}{'erro típico':>13}{'viés':>8}{'80 % dos dias':>20}{'pior abaixo':>13}{'pior acima':>12}")
+            for _, z in tm.iterrows():
+                print(f"{'D+'+str(z.h):>5}{z.erro_tipico_gw:>10.2f} GW{z.vies_gw:>+8.2f}"
+                      f"{f'{z.p10_gw:+.2f} a {z.p90_gw:+.2f}':>20}{z.pior_abaixo_gw:>+13.2f}{z.pior_acima_gw:>+12.2f}")
+    if "janela" in recs:
+        rotulo, x = recs["janela"]
+        x = x[x.subsistema == sub]
+        if len(x):
+            print(f"\n{rotulo}: ano a ano  -  viés da média diária (GW); cada ano é uma amostra pequena (~7 dias)")
+            a = (x[x.metrica == "media"].groupby(["ano", "h"]).erro_mw.mean() / 1000).unstack()
+            a.columns = [f"D+{h}" for h in a.columns]
+            print(a.round(2).to_string())
+            fer = x[(x.metrica == "media") & (x.h == 1) & ~x.tipo_dia.isin(TIPOS_NORMAIS)]
+            if len(fer):
+                print(f"(inclui {fer.dia.nunique()} dia(s) de feriado/ponte/especial: "
+                      f"{sorted({d.strftime('%d/%m/%Y') for d in fer.dia})})")
+    grafico_gw(tab, recs, saida, sub)
+    return tab
+
+
+def grafico_gw(tab, recs, saida, sub):
+    chaves = [k for k in recs if k in set(tab.recorte)]
+    fig, axs = plt.subplots(2, len(chaves), figsize=(4.6 * len(chaves), 7), sharex=True, squeeze=False)
+    cor = "#2a78d6"
+    for i, m in enumerate(["media", "ponta"]):
+        lims = tab[(tab.metrica == m) & (tab.subsistema == sub)]
+        lo, hi = lims.p10_gw.min(), lims.p90_gw.max()
+        for j, k in enumerate(chaves):
+            t = tab[(tab.recorte == k) & (tab.metrica == m) & (tab.subsistema == sub)].sort_values("h")
+            ax = axs[i, j]
+            ax.fill_between(t.h, t.p10_gw, t.p90_gw, color=cor, alpha=0.22, lw=0, label="80 % dos dias (P10-P90)")
+            ax.plot(t.h, t.vies_gw, color=cor, lw=2, marker="o", ms=4, label="viés (média com sinal)")
+            ax.axhline(0, color="#52514e", lw=0.8)
+            for _, z in t.iterrows():
+                ax.annotate(f"±{z.erro_tipico_gw:.1f}", (z.h, z.p90_gw), textcoords="offset points", xytext=(0, 4),
+                            ha="center", fontsize=7.5, color="#0b0b0b")
+            ax.set_ylim(lo - 0.15 * (hi - lo), hi + 0.2 * (hi - lo))
+            ax.set_title(f"{recs[k][0]}\n{'média' if m == 'media' else 'ponta'} diária", fontsize=9, loc="left")
+            ax.set_xticks(list(HORIZONTES), [f"D+{h}" for h in HORIZONTES], fontsize=7)
+            _estilo(ax)
+        axs[i, 0].set_ylabel("erro (GW)", fontsize=8)
+    axs[0, 0].legend(fontsize=7, frameon=False, loc="lower left")
+    fig.suptitle(f"{sub}: quanto a previsão erra em GW por antecedência  (±x = erro típico; negativo = abaixo do oficial)",
+                 fontsize=10, x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(saida / f"relatorio_gw_{sub}.png", dpi=130)
+    plt.close(fig)
+
+
+def ler_erro_diario(saida):
+    d = pd.read_csv(saida / "erro_diario.csv", sep=";", decimal=",", encoding="utf-8-sig", parse_dates=["rodada", "dia"])
+    return d
+
+
 # ------------------------------------------------------------------ principal
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -529,12 +632,23 @@ def main():
     ap.add_argument("--prev-csv", help="teste: CSV no formato de fac_sintegre_prev_carga_dessem")
     ap.add_argument("--oficial-csv", help="teste: CSV no formato da tabela do oficial escolhido")
     ap.add_argument("--saida", default=str(OUTPUT_DIR))
+    ap.add_argument("--mes", type=int, default=pd.Timestamp.today().month, help="mês do relatório em GW (padrão: atual)")
+    ap.add_argument("--dias", default="8-14", help="janela de dias do mês no relatório em GW, ex.: 8-14 (2ª semana); "
+                                                   "'' desliga")
+    ap.add_argument("--sub", default="SIN", choices=SUBS, help="subsistema impresso no relatório em GW")
+    ap.add_argument("--so-relatorio", action="store_true",
+                    help="não consulta o banco: refaz só o relatório em GW a partir do erro_diario.csv já gerado")
     a = ap.parse_args()
 
     ini = pd.Timestamp(a.ini)
     fim = pd.Timestamp(a.fim) if a.fim else pd.Timestamp.today().normalize()
     saida = Path(a.saida) / a.oficial
     saida.mkdir(parents=True, exist_ok=True)
+    dias = tuple(int(v) for v in a.dias.split("-")) if a.dias else None
+    if a.so_relatorio:
+        relatorio_gw(longo_diario(ler_erro_diario(saida)), a.mes, dias, saida, a.sub)
+        print(f"\nsaídas em {saida}", flush=True)
+        return
     eng = None
     if not (a.prev_csv and a.oficial_csv):
         eng = engine_banco()
@@ -587,6 +701,7 @@ def main():
     grafico_serie(res_ano, saida)
     imprimir_resumo(quadro, "normais")
     imprimir_resumo(quadro, "todos")
+    relatorio_gw(longo, a.mes, dias, saida, a.sub)
     print(f"\nsaídas em {saida}", flush=True)
 
 
