@@ -28,6 +28,9 @@ enviada já trazia a série completa, então não precisa de mais anos.
    `h = dia alvo - dia da rodada`, mantendo D+1 a D+7. D+0 fica de fora porque, quando a previsão roda, o
    oficial do dia já existe.
 4. Só entram dias com as 24 horas completas.
+   Antes disso, valores <= 0 ou fora de 30 % a 200 % da mediana do subsistema são descartados, com aviso.
+   Linhas repetidas para o mesmo horário também geram aviso, e entra a média delas.
+   Dias listados em `dias_excluidos.csv` (colunas `dia;motivo`, na pasta do script) saem da análise.
 5. **Checagem de alinhamento.** Calcula o MAE de D+1 deslocando o oficial em -1, 0 e +1 h. Se o mínimo não
    estiver em 0, a convenção de rótulo de alguma tabela está trocada. Ajuste em `rotulo_fim`.
 
@@ -85,6 +88,7 @@ indica mudança de modelo ou de metodologia da carga. Nesse caso, restrinja o pe
 | `resumo_tipo_dia.csv` | por tipo de dia (inclui feriado, ponte, especial) |
 | `resumo_ano_mes.csv` | viés por ano e mês |
 | `perfil_hora.csv`, `perfil_mes_hora.csv` | erro horário e de formato |
+| `piores_dias.csv` | 30 maiores erros por métrica e subsistema, com o erro de cada subsistema ao lado, para achar dado ruim |
 | `erro_diario.csv`, `pares_horarios.csv.gz` | bases para análises próprias |
 | `horizonte.png` | viés, desvio e MAPE por antecedência |
 | `mes_horizonte_media.png`, `mes_horizonte_ponta.png` | mapas mês x antecedência (viés % e desvio %) |

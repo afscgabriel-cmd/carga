@@ -29,8 +29,10 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     pares_horarios.csv.gz      base hora a hora (rodada, dia, hora, subsistema, h, prev, ofi)
     erro_diario.csv            uma linha por rodada x dia x subsistema (média, ponta, hora da ponta)
     resumo_mes_horizonte.csv   métrica x subsistema x mês x h            (dias normais)
-    relatorio_gw.csv           LEITURA DIRETA EM GW: histórico, mês (--mes) e janela de dias (--dias): erro típico,
+    relatorio_gw.csv           LEITURA DIRETA EM GW: histórico, mês (--mes) e janela de dias (--dias): erro médio e mediano,
                                viés, faixa de 80 % dos dias, pior erro; + relatorio_gw_<sub>.png
+    piores_dias.csv            30 maiores erros por métrica e subsistema, com o erro de cada subsistema ao lado
+                               (para achar dado ruim; dias a descartar vão em dias_excluidos.csv: dia;motivo)
     quadro_agregado.csv        TODO O HISTÓRICO por antecedência, em GW e %: viés, IC, desvio, MAPE, faixa P5-P95
                                (dias normais e todos os dias, inclusive feriados)
     resumo_horizonte.csv       métrica x subsistema x h                  (dias normais, todos os meses, em MW)
@@ -66,6 +68,8 @@ INICIO = "2022-01-01"
 HORIZONTES = range(1, 8)                 # D+1 a D+7
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 NOMES_SUB = {"SUDESTE": "SE", "SE/CO": "SE", "SECO": "SE", "SUL": "S", "NORDESTE": "NE", "NORTE": "N"}
+LIMITES_PLAUSIVEIS = (0.3, 2.0)           # hora descartada se <= 30 % ou >= 200 % da mediana do subsistema
+DIAS_EXCLUIDOS_CSV = PASTA / "dias_excluidos.csv"   # opcional: colunas dia;motivo (dias alvo fora da análise)
 N_BOOT = 500                              # reamostragens do bootstrap em blocos semanais
 QUANTIS = [0.05, 0.25, 0.50, 0.75, 0.95]
 
@@ -148,16 +152,32 @@ def _subsistema(s):
     return s.replace(NOMES_SUB)
 
 
-def _horario(d, rotulo_fim):
-    """valido_para -> hora cheia de início; média das meias-horas da mesma hora."""
+def _horario(d, rotulo_fim, nome):
+    """valido_para -> hora cheia de início; média das meias-horas da mesma hora.
+    Descarta (e avisa) valores <= 0 e fora de LIMITES_PLAUSIVEIS x a mediana do subsistema."""
     d["valido_para"] = pd.to_datetime(d.valido_para)
     if rotulo_fim:
         d["valido_para"] -= pd.Timedelta(minutes=30)
-    d["valido_para"] = d.valido_para.dt.floor("h")
     d["mw"] = pd.to_numeric(d.mw, errors="coerce")
     d["subsistema"] = _subsistema(d.subsistema)
+    d = d.dropna(subset=["mw"])
     chaves = [c for c in ["rodada", "valido_para", "subsistema"] if c in d]
-    return d.dropna(subset=["mw"]).groupby(chaves, as_index=False).mw.mean()
+    dup = d.duplicated(chaves, keep=False)
+    if dup.any():
+        difer = d[dup].groupby(chaves).mw.nunique()
+        print(f"AVISO {nome}: {int(dup.sum()):,} linhas repetidas para o mesmo horário ({int((difer > 1).sum()):,} com valores "
+              f"diferentes) -> usada a média", flush=True)
+    mediana = d.groupby("subsistema").mw.transform("median")
+    lo, hi = LIMITES_PLAUSIVEIS
+    ruim = (d.mw <= lo * mediana) | (d.mw >= hi * mediana)
+    if ruim.any():
+        r = d[ruim]
+        print(f"AVISO {nome}: {int(ruim.sum()):,} valores implausíveis descartados (<= 0 ou fora de {lo:.0%}-{hi:.0%} da "
+              f"mediana do subsistema), em {r.valido_para.dt.normalize().nunique()} dia(s); "
+              f"ex.: {r.sort_values('valido_para').head(3)[['valido_para', 'subsistema', 'mw']].to_dict('records')}", flush=True)
+        d = d[~ruim]
+    d["valido_para"] = d.valido_para.dt.floor("h")
+    return d.groupby(chaves, as_index=False).mw.mean()
 
 
 def _com_sin(d, chaves):
@@ -180,7 +200,7 @@ def ler_previsao(engine, ini, fim, csv=None):
     d = d.rename(columns={c["rodada"]: "rodada", c["tempo"]: "valido_para", c["sub"]: "subsistema", c["valor"]: "mw"})
     d["rodada"] = pd.to_datetime(d.rodada).dt.normalize()
     d = d.drop_duplicates(["rodada", "valido_para", "subsistema"], keep="last")   # 1 rodada por dia
-    d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"])
+    d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"], "previsão")
     d = _com_sin(d, ["rodada", "valido_para"])
     print(f"previsão: {d.rodada.nunique():,} rodadas ({d.rodada.min().date()} a {d.rodada.max().date()}), "
           f"subsistemas {sorted(d.subsistema.unique())} ({time.time()-t0:.0f}s)", flush=True)
@@ -192,7 +212,7 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
     t0 = time.time()
     if qual == "realizado":
         d = ler_realizado(engine, ini.date(), fim.date(), c["tabela"], csv)
-        d = _horario(d.copy(), c["rotulo_fim"])
+        d = _horario(d.copy(), c["rotulo_fim"], "oficial")
     else:
         if csv:
             d = _ler_csv(csv)
@@ -201,7 +221,7 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
                                    c["col_dia"], ini, fim)
         d = d.rename(columns={c["rodada"]: "rodada", c["tempo"]: "valido_para", c["sub"]: "subsistema", c["valor"]: "mw"})
         d["rodada"] = pd.to_datetime(d.rodada).dt.normalize()
-        d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"])
+        d = _horario(d[["rodada", "valido_para", "subsistema", "mw"]].copy(), c["rotulo_fim"], "oficial")
         d["dia"] = d.valido_para.dt.normalize()
         d["delta"] = (d.dia - d.rodada).dt.days
         d = d[d.delta >= c["delta"]]
@@ -538,7 +558,8 @@ def recortes_gw(longo, mes, dias):
 def tabela_gw(x):
     g = x.groupby(["metrica", "subsistema", "h"]).erro_mw
     t = pd.DataFrame({"n_dias": g.size(), "n_anos": x.groupby(["metrica", "subsistema", "h"]).ano.nunique(),
-                      "erro_tipico_gw": g.apply(lambda e: e.abs().mean()) / 1000,
+                      "erro_medio_gw": g.apply(lambda e: e.abs().mean()) / 1000,
+                      "erro_mediano_gw": g.apply(lambda e: e.abs().median()) / 1000,
                       "vies_gw": g.mean() / 1000,
                       "p10_gw": g.quantile(0.10) / 1000, "p90_gw": g.quantile(0.90) / 1000,
                       "pior_abaixo_gw": g.min() / 1000, "pior_acima_gw": g.max() / 1000,
@@ -558,8 +579,9 @@ def relatorio_gw(longo, mes, dias, saida, sub="SIN"):
 
     print("\n" + "=" * 96)
     print(f"QUANTO O MODELO ERRA, EM GW  -  {sub}  (erro = previsto - oficial; negativo = previsão abaixo do oficial)")
-    print("  erro típico = média do erro sem sinal (quanto erra, para cima ou para baixo)")
-    print("  viés        = média com sinal (para que lado costuma errar)")
+    print("  erro médio   = média do erro sem sinal (MAE): quanto erra, para cima ou para baixo; sente os extremos")
+    print("  erro mediano = mediana do erro sem sinal: metade dos dias erra menos que isso; não sente os extremos")
+    print("  viés         = média com sinal (para que lado costuma errar)")
     print("  80 % dos dias = entre P10 e P90;   pior = maior erro observado para cada lado")
     for chave, (rotulo, _) in recs.items():
         t = tab[(tab.recorte == chave) & (tab.subsistema == sub)]
@@ -569,9 +591,9 @@ def relatorio_gw(longo, mes, dias, saida, sub="SIN"):
             tm = t[t.metrica == m]
             print(f"\n{rotulo}  -  {'média diária' if m == 'media' else 'ponta diária'}"
                   f"  ({tm.n_dias.min()}-{tm.n_dias.max()} dias, {tm.n_anos.max()} anos)")
-            print(f"{'':>5}{'erro típico':>13}{'viés':>8}{'80 % dos dias':>20}{'pior abaixo':>13}{'pior acima':>12}")
+            print(f"{'':>5}{'erro médio':>12}{'mediano':>9}{'viés':>8}{'80 % dos dias':>20}{'pior abaixo':>13}{'pior acima':>12}")
             for _, z in tm.iterrows():
-                print(f"{'D+'+str(z.h):>5}{z.erro_tipico_gw:>10.2f} GW{z.vies_gw:>+8.2f}"
+                print(f"{'D+'+str(z.h):>5}{z.erro_medio_gw:>9.2f} GW{z.erro_mediano_gw:>9.2f}{z.vies_gw:>+8.2f}"
                       f"{f'{z.p10_gw:+.2f} a {z.p90_gw:+.2f}':>20}{z.pior_abaixo_gw:>+13.2f}{z.pior_acima_gw:>+12.2f}")
     if "janela" in recs:
         rotulo, x = recs["janela"]
@@ -603,7 +625,7 @@ def grafico_gw(tab, recs, saida, sub):
             ax.plot(t.h, t.vies_gw, color=cor, lw=2, marker="o", ms=4, label="viés (média com sinal)")
             ax.axhline(0, color="#52514e", lw=0.8)
             for _, z in t.iterrows():
-                ax.annotate(f"±{z.erro_tipico_gw:.1f}", (z.h, z.p90_gw), textcoords="offset points", xytext=(0, 4),
+                ax.annotate(f"±{z.erro_medio_gw:.1f}", (z.h, z.p90_gw), textcoords="offset points", xytext=(0, 4),
                             ha="center", fontsize=7.5, color="#0b0b0b")
             ax.set_ylim(lo - 0.15 * (hi - lo), hi + 0.2 * (hi - lo))
             ax.set_title(f"{recs[k][0]}\n{'média' if m == 'media' else 'ponta'} diária", fontsize=9, loc="left")
@@ -611,11 +633,47 @@ def grafico_gw(tab, recs, saida, sub):
             _estilo(ax)
         axs[i, 0].set_ylabel("erro (GW)", fontsize=8)
     axs[0, 0].legend(fontsize=7, frameon=False, loc="lower left")
-    fig.suptitle(f"{sub}: quanto a previsão erra em GW por antecedência  (±x = erro típico; negativo = abaixo do oficial)",
+    fig.suptitle(f"{sub}: quanto a previsão erra em GW por antecedência  (±x = erro médio sem sinal; negativo = abaixo do oficial)",
                  fontsize=10, x=0.01, ha="left")
     fig.tight_layout()
     fig.savefig(saida / f"relatorio_gw_{sub}.png", dpi=130)
     plt.close(fig)
+
+
+def excluir_dias(d, col="dia"):
+    """Tira os dias alvo listados em dias_excluidos.csv (se existir), ex.: apagão de 15/08/2023."""
+    if not DIAS_EXCLUIDOS_CSV.exists():
+        return d
+    ex = pd.read_csv(DIAS_EXCLUIDOS_CSV, sep=";", encoding="utf-8-sig")
+    dias = set(pd.to_datetime(ex.dia, dayfirst=True).dt.normalize())
+    fora = d[col].isin(dias)
+    print(f"dias_excluidos.csv: {len(dias)} dia(s) listado(s), {int(fora.sum()):,} linhas removidas", flush=True)
+    return d[~fora]
+
+
+def piores_dias(longo, saida, n=10, sub="SIN"):
+    """Maiores erros (rodada x dia), com o erro de cada subsistema ao lado: mostra de onde vem um erro absurdo."""
+    por_sub = longo.pivot_table(index=["metrica", "rodada", "dia"], columns="subsistema", values="erro_mw").div(1000)
+    por_sub.columns = [f"erro_{c}_gw" for c in por_sub.columns]
+    x = longo.assign(abs_mw=longo.erro_mw.abs())
+    top = (x.sort_values("abs_mw", ascending=False).groupby(["metrica", "subsistema"]).head(30)
+           .merge(por_sub.reset_index(), on=["metrica", "rodada", "dia"], how="left"))
+    top = top.assign(prev_gw=top.prev / 1000, ofi_gw=top.ofi / 1000, erro_gw=top.erro_mw / 1000)
+    cols = ["metrica", "subsistema", "dia", "rodada", "h", "tipo_dia", "prev_gw", "ofi_gw", "erro_gw", "erro_pct"] + \
+           [c for c in por_sub.columns]
+    top = top.sort_values(["metrica", "subsistema", "abs_mw"], ascending=[True, True, False])[cols]
+    _salvar(top, "piores_dias.csv", saida)
+    for m in ["media", "ponta"]:
+        t = top[(top.metrica == m) & (top.subsistema == sub)].head(n)
+        print(f"\nPIORES DIAS  -  {sub}, {'média' if m == 'media' else 'ponta'} diária (GW; erro de cada subsistema à direita)")
+        print(f"{'dia':>10}{'rodada':>12}{'h':>5}{'tipo':>9}{'prev':>8}{'oficial':>9}{'erro':>8}  "
+              + "".join(f"{c:>7}" for c in SUBS[:4]))
+        for _, z in t.iterrows():
+            print(f"{z.dia:%d/%m/%Y}  {z.rodada:%d/%m/%Y}{'D+'+str(z.h):>5}{z.tipo_dia:>9}{z.prev_gw:>8.1f}{z.ofi_gw:>9.1f}"
+                  f"{z.erro_gw:>+8.1f}  " + "".join(f"{z.get(f'erro_{c}_gw', np.nan):>+7.1f}" for c in SUBS[:4]))
+    print("Pistas de dado ruim: o MESMO dia alvo com erro enorme em várias rodadas (as 7 previsões concordam entre si ->"
+          " o problema está no oficial); erro concentrado num só subsistema; 'oficial' muito abaixo do normal.\n"
+          "Conferir na tabela de origem e, se for o caso, listar o dia em dias_excluidos.csv (colunas dia;motivo).")
 
 
 def ler_erro_diario(saida):
@@ -646,7 +704,9 @@ def main():
     saida.mkdir(parents=True, exist_ok=True)
     dias = tuple(int(v) for v in a.dias.split("-")) if a.dias else None
     if a.so_relatorio:
-        relatorio_gw(longo_diario(ler_erro_diario(saida)), a.mes, dias, saida, a.sub)
+        longo = longo_diario(excluir_dias(ler_erro_diario(saida)))
+        piores_dias(longo, saida, sub=a.sub)
+        relatorio_gw(longo, a.mes, dias, saida, a.sub)
         print(f"\nsaídas em {saida}", flush=True)
         return
     eng = None
@@ -661,6 +721,7 @@ def main():
     checar_alinhamento(pares[pares.h == 1])
 
     feriados = ler_feriados()
+    pares = excluir_dias(pares)
     diario = erro_diario(pares, feriados)
     longo = longo_diario(diario)
     normais = longo[longo.tipo_dia.isin(TIPOS_NORMAIS)]
@@ -701,6 +762,7 @@ def main():
     grafico_serie(res_ano, saida)
     imprimir_resumo(quadro, "normais")
     imprimir_resumo(quadro, "todos")
+    piores_dias(longo, saida, sub=a.sub)
     relatorio_gw(longo, a.mes, dias, saida, a.sub)
     print(f"\nsaídas em {saida}", flush=True)
 
