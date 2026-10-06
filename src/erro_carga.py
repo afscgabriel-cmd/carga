@@ -154,7 +154,8 @@ def _consulta_em_lotes(engine, sql, col_filtro, ini, fim, meses=3):
             partes.append(pd.read_sql(text(f"{sql} WHERE {col_filtro} >= :a AND {col_filtro} < :b"), con,
                                       params={"a": a.date(), "b": b.date()}))
             print(f"  {a.date()} a {(b - pd.Timedelta(days=1)).date()}: {len(partes[-1]):,} linhas", flush=True)
-    return pd.concat(partes, ignore_index=True)
+    cheias = [p for p in partes if len(p)]
+    return pd.concat(cheias, ignore_index=True) if cheias else partes[0]
 
 
 def _colunas(engine, tabela):
@@ -286,9 +287,7 @@ def ler_oficial(engine, ini, fim, csv=None, qual=OFICIAL):
     d = _com_sin(d, ["valido_para"])
     print(f"oficial ({qual}): {d.valido_para.min().date()} a {d.valido_para.max().date()}, "
           f"subsistemas {sorted(d.subsistema.unique())} ({time.time()-t0:.0f}s)", flush=True)
-    if qual != "realizado":
-        d.attrs["delta1"] = delta1
-    return d
+    return d, (delta1 if qual != "realizado" else None)
 
 
 # ------------------------------------------------------------------ calendário
@@ -557,7 +556,7 @@ def checar_alinhamento(prev, ofi):
     o = ofi[ofi.subsistema == "SIN"].set_index("valido_para").mw
     mae_h = {k: (p - o.shift(k, freq="h")).abs().mean() for k in (-1, 0, 1)}
     mae_d = {k: (p - o.shift(k, freq="D")).abs().mean() for k in (-1, 0, 1)}
-    iguais = {k: 100 * ((p - o.shift(k, freq="D")).abs() < 1).mean() for k in (-1, 0, 1)}
+    iguais = {k: 100 * ((p - o.shift(k, freq="D")).dropna().abs() < 1).mean() for k in (-1, 0, 1)}
     print("alinhamento SIN D+1, oficial deslocado em horas: " + ", ".join(f"{k:+d}h {v:,.0f} MW" for k, v in mae_h.items()), flush=True)
     print("alinhamento SIN D+1, oficial deslocado em dias:  " + ", ".join(f"{k:+d}d {v:,.0f} MW" for k, v in mae_d.items()), flush=True)
     print("horas com previsão D+1 = oficial (dif < 1 MW):   " + ", ".join(f"{k:+d}d {v:.0f} %" for k, v in iguais.items()), flush=True)
@@ -1115,13 +1114,13 @@ def main():
         eng = engine_banco()
 
     prev = ler_previsao(eng, ini, fim, a.prev_csv)
-    ofi = ler_oficial(eng, ini, fim, a.oficial_csv, a.oficial)
+    ofi, ofi_delta1 = ler_oficial(eng, ini, fim, a.oficial_csv, a.oficial)
     pares = montar_pares(prev, ofi)
     pares = pares[(pares.dia >= ini) & (pares.dia <= fim)]
     print(f"pares horários: {len(pares):,} ({pares.dia.min().date()} a {pares.dia.max().date()})", flush=True)
     checar_alinhamento(prev, ofi)
     if a.oficial == "deck":
-        checar_cadeia(prev, ofi, ofi.attrs.get("delta1"))
+        checar_cadeia(prev, ofi, ofi_delta1)
 
     feriados = ler_feriados()
     pares = excluir_dias(pares)
