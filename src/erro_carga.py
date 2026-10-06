@@ -820,7 +820,7 @@ ROT_Q = {0.95: "estresse alto", 0.90: "alto", 0.50: "central", 0.10: "baixo", 0.
 JANELA_EPOCA = 30                 # ± dias em torno da data, todos os anos (centro e largura da época)
 LIM_AJUSTE_MW = 10                # D+1: |oficial - previsão| < 10 MW na média do dia = operador não ajustou
 PASSO_CENTRO = 7                  # a época é tabelada a cada 7 dias do ano
-CENTROS = np.arange(1, 366, PASSO_CENTRO) + PASSO_CENTRO // 2
+CENTROS = [int(c) for c in np.arange(1, 366, PASSO_CENTRO) + PASSO_CENTRO // 2]   # int puro (Windows: int32 x int64)
 
 
 def _na_janela(datas, ref, janela):
@@ -831,7 +831,7 @@ def _na_janela(datas, ref, janela):
 
 def _centro_doy(datas, passo=PASSO_CENTRO):
     """Centro de época (a cada `passo` dias do ano) de cada data."""
-    return ((datas.dt.dayofyear - 1) // passo) * passo + 1 + passo // 2
+    return (((datas.dt.dayofyear - 1) // passo) * passo + 1 + passo // 2).astype("int64")
 
 
 def _data_centro(c):
@@ -880,7 +880,7 @@ def tabela_epoca(x, janela=JANELA_EPOCA):
         g = t.groupby(["metrica", "subsistema", "h"]).r
         q = g.quantile([0.25, 0.50, 0.75]).unstack()
         partes.append(pd.DataFrame({"mu_bruto": q[0.50], "sigma_bruto": (q[0.75] - q[0.25]) / 1.349,
-                                    "n": g.size()}).reset_index().assign(centro=c))
+                                    "n": g.size()}).reset_index().assign(centro=int(c)))
     return _suavizar(pd.concat(partes, ignore_index=True))
 
 
@@ -908,7 +908,7 @@ def modelo_d1(x, janela=JANELA_EPOCA):
         g = t.groupby(["metrica", "subsistema"])
         escala = t[t.ajustou].groupby(["metrica", "subsistema"]).r.apply(lambda v: v.abs().median())
         partes.append(pd.DataFrame({"p_ajuste": g.ajustou.mean(), "escala": escala, "n": g.size()})
-                      .reset_index().assign(centro=c))
+                      .reset_index().assign(centro=int(c)))
     ep = pd.concat(partes, ignore_index=True)
     a = d[d.ajustou].merge(ep[["centro", "metrica", "subsistema", "escala"]], on=["centro", "metrica", "subsistema"])
     a["u"] = a.r / a.escala
@@ -948,7 +948,7 @@ def modelo_semana(x, epoca, janela=JANELA_EPOCA):
         t = w[_na_janela(w.rodada, _data_centro(c), janela)]
         if len(t) >= 10:
             q25, q50, q75 = np.percentile(t.W, [25, 50, 75])
-            partes.append({"centro": c, "muW": q50, "sigmaW": max((q75 - q25) / 1.349, 1e-3), "nW": len(t)})
+            partes.append({"centro": int(c), "muW": q50, "sigmaW": max((q75 - q25) / 1.349, 1e-3), "nW": len(t)})
     ew = pd.DataFrame(partes)
     if ew.empty:
         return ew, None, None, 0
@@ -982,7 +982,8 @@ def quantis_dia(mod):
         linhas.append({"centro": z.centro, "metrica": z.metrica, "subsistema": z.subsistema, "h": 1,
                        "n": z.n, "p_ajuste": z.p_ajuste, **dict(zip(PCOLS, v))})
     cols = ["centro", "metrica", "subsistema", "h", "n", "mu", "sigma"] + PCOLS
-    return pd.concat([t[cols], pd.DataFrame(linhas)], ignore_index=True)
+    out = pd.concat([t[cols], pd.DataFrame(linhas)], ignore_index=True)
+    return out.astype({"centro": "int64", "h": "int64"})
 
 
 def cenarios_semana(mod, c):
@@ -1117,7 +1118,7 @@ def _quantis_empiricos(tr, centros, janela):
             continue
         q = t.groupby(["metrica", "subsistema", "h"]).r.quantile(QS).unstack()
         q.columns = PCOLS
-        partes.append(q.reset_index().assign(centro=c))
+        partes.append(q.reset_index().assign(centro=int(c)))
     return pd.concat(partes, ignore_index=True)
 
 
@@ -1141,7 +1142,9 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
         mod = ajustar_modelo(tr, janela)
         for nome, Q in [(nome_emp, _quantis_empiricos(tr, sorted(te.centro.unique()), janela_emp)),
                         (nome_pad, quantis_dia(mod))]:
-            m = te.merge(Q[["centro", "metrica", "subsistema", "h"] + PCOLS], on=["centro", "metrica", "subsistema", "h"])
+            Q = Q.astype({"centro": "int64", "h": "int64"})
+            m = te.astype({"centro": "int64", "h": "int64"}).merge(Q[["centro", "metrica", "subsistema", "h"] + PCOLS],
+                                                                  on=["centro", "metrica", "subsistema", "h"])
             partes.append(m.assign(metodo=nome, ano_teste=Y, treino=f"{tr.dia.min():%m/%Y}-{tr.dia.max():%m/%Y}"))
         if mod["semana"] is not None and not mod["semana"].empty:
             w = semanas(x)
