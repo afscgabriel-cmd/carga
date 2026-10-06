@@ -893,6 +893,13 @@ def cenarios(longo, saida, ref=None, janela=15, mesmo_dia_semana=False, ult=None
           f"{len(nota)} semanas completas)")
     print("  valores = ajuste % sobre a previsão para chegar ao oficial:  carga do cenário = previsão x (1 + ajuste/100)")
     print("  positivo = oficial acima da previsão.  P5/P10 = cenários altos, P50 = central, P90/P95 = cenários baixos")
+    amostra = longo[_na_janela(longo.rodada, ref, janela, mesmo_dia_semana) & (longo.metrica == "media")
+                    & (longo.subsistema == "SIN")]
+    por_ano = amostra[amostra.h == 1].groupby(amostra.rodada.dt.year).rodada.nunique()
+    print(f"  amostra (n): rodadas feitas entre {ref - pd.Timedelta(days=janela):%d/%m} e {ref + pd.Timedelta(days=janela):%d/%m}"
+          f" de cada ano, com o oficial do dia alvo disponível; rodadas por ano: {por_ano.to_dict()}")
+    print("  n = nº de dias (rodada -> dia alvo) com erro calculado naquela antecedência; cai em D+7 porque as rodadas"
+          " mais recentes ainda não têm o oficial de 7 dias à frente")
     if len(nota) < 20:
         print(f"  AVISO: só {len(nota)} semanas na janela -> quantis instáveis; aumentar --janela", flush=True)
 
