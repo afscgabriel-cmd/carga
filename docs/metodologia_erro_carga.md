@@ -142,7 +142,8 @@ diminuindo. Para corrigir sem perder a sazonalidade, a largura e o centro são s
   `z`, que já está sem sazonalidade: o deslocamento da mediana de z e a razão das larguras de z (recente / histórico).
   Assim, uma estação não é confundida com melhora do modelo.
 
-No D+1 entram a taxa de ajuste e o tamanho do ajuste recentes; na semana, o centro e a largura de W recentes. Com
+O D+1 fica sempre no histórico: é comportamento do operador, e o nível recente piorou a calibração dele. Na semana
+entram o centro e a largura de W recentes. Com
 menos de 60 dias recentes, o fator fica neutro. Como só olha para trás, o ajuste chega atrasado quando a melhora
 continua: menos dias acompanham mais rápido, com mais ruído.
 
@@ -165,6 +166,9 @@ padronizado com nível recente. O terminal fecha com um resumo do SIN e indica o
 | oficial acima do alto (r > P90) | 10 % |
 | oficial abaixo do baixo (r < P10) | 10 % |
 | pinball (perda quantílica média em P5..P95) | menor = melhor |
+
+No D+1, um dia sem ajuste do operador (`|oficial - previsão| < 10 MW`) conta como r = 0 exato. Sem isso, diferenças
+de poucos MW contavam como "abaixo" ou "acima" quando o quantil caía em 0.
 
 Os cenários semanais são testados da mesma forma (W contra P10-P90 de W). Saídas: `calibracao_horizonte.csv`,
 `calibracao_ano.csv` e `calibracao_semanas.csv`. Com o histórico atual, os anos de teste são 2025 e 2026: o resultado

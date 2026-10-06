@@ -1006,9 +1006,10 @@ def ajustar_modelo(x, janela=JANELA_EPOCA, recente=False):
     forma, nivel = forma_caudas(x, ep)
     d1, am1, nivel_d1 = modelo_d1(x, janela)
     ew, zW, beta, n_sem, nivelW = modelo_semana(x, ep, janela)
+    # D+1 = comportamento do operador: fica sempre no histórico (o nível recente piorou a calibração do D+1)
+    nivel_d1 = nivel_d1.assign(p_rec=nivel_d1.p_hist, sc_rec=nivel_d1.sc_hist)
     if not recente:                                   # fatores neutros
         nivel = nivel.assign(m_rec=nivel.m_hist, s_rec=nivel.s_hist)
-        nivel_d1 = nivel_d1.assign(p_rec=nivel_d1.p_hist, sc_rec=nivel_d1.sc_hist)
         if nivelW:
             nivelW = dict(nivelW, m_rec=nivelW["m_hist"], s_rec=nivelW["s_hist"])
     nivel["k"] = nivel.s_rec / nivel.s_hist
@@ -1104,9 +1105,8 @@ def cenarios(longo, saida, ref=None, janela=JANELA_EPOCA, ult=None, recente=Fals
         for m in ["media", "ponta"]:
             if m in nv.index:
                 z = nv.loc[m]
-                d1 = (f"; D+1: ajusta em {100 * n1.loc[m].p_rec:.0f} % dos dias (histórico {100 * n1.loc[m].p_hist:.0f} %)"
-                      if m in n1.index else "")
-                print(f"    {m:6} D+2..D+7: largura x{z.k:.2f}, centro {z.m_rec - z.m_hist:+.2f} largura{d1}")
+                print(f"    {m:6} D+2..D+7: largura x{z.k:.2f}, centro {z.m_rec - z.m_hist:+.2f} largura"
+                      f"   (D+1 fica no histórico)")
     datas = ult.drop_duplicates("h").set_index("h").dia.to_dict() if ult is not None and len(ult) else {}
     tipos = {}
     if datas:
@@ -1231,6 +1231,9 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
         print("\ncalibração: histórico curto demais (precisa de cerca de 1 ano antes do ano de teste)")
         return
     m = pd.concat(partes, ignore_index=True)
+    # D+1 sem ajuste (|oficial - previsão| < LIM_AJUSTE_MW) é r = 0 exato; sem isso, diferenças de poucos MW contam
+    # como "abaixo/acima" quando o quantil cai em 0
+    m["r"] = np.where((m.h == 1) & (m.erro_mw.abs() < LIM_AJUSTE_MW), 0.0, m.r)
     m["dentro_80"] = m.r.between(m.p10, m.p90)
     m["dentro_90"] = m.r.between(m.p05, m.p95)
     m["acima_alto"] = m.r > m.p90
