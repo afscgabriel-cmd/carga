@@ -109,3 +109,19 @@ indica mudança de modelo ou de metodologia da carga. Nesse caso, restrinja o pe
 - Feriados regionais (estaduais) por subsistema.
 - Decomposição `previsto - realizado = (previsto - oficial) + (oficial - realizado)`: basta rodar com
   `--oficial realizado` e comparar com o resultado do deck.
+
+## 8. Cenários (teste de sensibilidade), em %
+
+Os cenários são dados como **ajuste % sobre a previsão**, para chegar ao oficial:
+`carga do cenário = previsão x (1 + ajuste/100)`, com `ajuste = 100 x (1/(1+erro) - 1)`.
+Positivo quer dizer oficial acima da previsão. A amostra são as rodadas a ±`--janela` dias (padrão 15) da data
+de referência, em todos os anos. A data de referência padrão é a rodada mais recente.
+
+- **Dia a dia:** quantis P5, P10, P50, P90 e P95 do ajuste, por métrica, subsistema e h (`cenarios_fatores.csv`).
+  P5 e P10 são os cenários altos, P90 e P95 os baixos.
+- **Semana inteira:** semanas reais de erro (D+1..D+7 da mesma rodada, todos os subsistemas juntos), ordenadas
+  pelo erro médio da semana no SIN. As semanas P5/P10/P50/P90/P95 viram os cenários semanais
+  (`cenarios_semana_escolhidos.csv`). Elas preservam a correlação entre dias e entre subsistemas; aplicar o P10
+  de cada dia na semana inteira exageraria.
+- `cenarios_aplicados_*.csv` aplica os cenários à rodada mais recente (MW), para uso direto.
+- `--mesmo-dia-semana` restringe a amostra a rodadas do mesmo dia da semana (amostra cerca de 7x menor).
