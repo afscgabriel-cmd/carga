@@ -32,14 +32,11 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     relatorio_gw.csv           LEITURA DIRETA EM GW: histórico, mês (--mes) e janela de dias (--dias): erro médio e mediano,
                                viés com IC 95 % e se o zero está dentro/fora dele, faixa de 80 % dos dias,
                                pior erro; + relatorio_gw_<sub>.png
-    cenarios_fatores.csv       CENÁRIOS EM %: ajuste P5..P95 sobre a previsão (ajuste_pXX_pct) por métrica,
-                               subsistema e h, nas rodadas a ±--janela dias da data de referência (todos os anos)
-    cenarios_trajetorias.csv   semanas reais de erro (D+1..D+7, todos os subsistemas) dessa época do ano
-    cenarios_semana.csv        cenários semanais: média das semanas reais de cada faixa (estresse alto <P5, alto P5-P15,
-                               central P40-P60, baixo P85-P95, estresse baixo >P95); membros em _membros.csv
-    cenarios_aplicados_quantis.csv / _semana.csv / cenarios_<rodada>.png   cenários aplicados à rodada mais recente
-    calibracao_*.csv           CALIBRAÇÃO dos cenários fora da amostra (cada ano testado com cenários dos anos anteriores):
-                               % de dias dentro de P10-P90 (esperado 80) e P5-P95 (90), acima do alto, abaixo do baixo
+    cenarios_dia.csv           CENÁRIOS EM % (método padronizado): P5..P95 de r = oficial/previsão - 1 por métrica,
+                               subsistema e h, na época da data de referência (seção 8 da metodologia)
+    cenarios_semana.csv        cenário da semana (energia) e caminho dia a dia, P5..P95
+    cenarios_aplicados_*.csv   cenários aplicados à rodada mais recente (MW)
+    calibracao_*.csv           CALIBRAÇÃO fora da amostra: método padronizado x empírico (cobertura, caudas, pinball)
     piores_dias.csv            30 maiores erros por métrica e subsistema, com o erro de cada subsistema ao lado
                                (para achar dado ruim; dias a descartar vão em dias_excluidos.csv: dia;motivo)
     quadro_agregado.csv        TODO O HISTÓRICO por antecedência, em GW e %: viés, IC, desvio, MAPE, faixa P5-P95
@@ -806,60 +803,201 @@ def ler_erro_diario(saida):
     return d
 
 
-# ------------------------------------------------------------------ cenários (teste de sensibilidade)
-QUANTIS_CEN = [0.05, 0.10, 0.50, 0.90, 0.95]
-NOMES_CEN = {0.05: "estresse alto (P5)", 0.10: "alto (P10)", 0.50: "central (P50)", 0.90: "baixo (P90)",
-             0.95: "estresse baixo (P95)"}
-# erro = previsto - oficial  =>  oficial = previsto / (1 + erro%):  erro NEGATIVO (P5, P10) = carga ACIMA da previsão
+# ------------------------------------------------------------------ cenários de sensibilidade (método padronizado)
+# r = 100 x (oficial / previsão - 1): o ajuste % que leva a previsão ao oficial.  carga do cenário = previsão x (1 + r/100)
+# positivo = oficial acima da previsão.  P90/P95 = cenários altos, P10/P5 = cenários baixos.
+#
+# Cada parte do cenário é estimada com a quantidade de dado que exige (docs/metodologia_erro_carga.md, seção 8):
+#   centro e largura da época   mediana e IQR/1,349 de r nas rodadas a ±JANELA_EPOCA dias da data (todos os anos),
+#                               suavizados em h: centro linear em h, largura a + b·sqrt(h) (D+2..D+7)
+#   formato das caudas          quantis de z = (r - centro)/largura com TODO o histórico (D+2..D+7 juntos)
+#   D+1 (ajuste do operador)    chance de ajustar (época) x tamanho do ajuste (histórico, na escala da época)
+#   semana                      W = r médio de D+1..D+7 (SIN, média diária); quantis de W pelo mesmo método;
+#                               caminho dia a dia r_h = centro_h + beta_h x (W - centro_W), beta_h com todas as semanas
+QS = [0.05, 0.10, 0.50, 0.90, 0.95]
+PCOLS = [f"p{int(round(100 * q)):02d}" for q in QS]
+ROT_Q = {0.95: "estresse alto", 0.90: "alto", 0.50: "central", 0.10: "baixo", 0.05: "estresse baixo"}
+JANELA_EPOCA = 30                 # ± dias em torno da data, todos os anos (centro e largura da época)
+LIM_AJUSTE_MW = 10                # D+1: |oficial - previsão| < 10 MW na média do dia = operador não ajustou
+PASSO_CENTRO = 7                  # a época é tabelada a cada 7 dias do ano
+CENTROS = np.arange(1, 366, PASSO_CENTRO) + PASSO_CENTRO // 2
 
 
-def _na_janela(datas, ref, janela, mesmo_dia_semana=False):
-    """Datas de qualquer ano a até `janela` dias de ref no calendário (e, opcional, no mesmo dia da semana)."""
+def _na_janela(datas, ref, janela):
+    """Datas de qualquer ano a até `janela` dias de ref no calendário."""
     d = (datas.dt.dayofyear - ref.dayofyear).abs()
-    ok = np.minimum(d, 365 - d) <= janela
-    if mesmo_dia_semana:
-        ok &= datas.dt.dayofweek == ref.dayofweek
-    return ok
+    return np.minimum(d, 365 - d) <= janela
 
 
-def fatores_cenario(longo, ref, janela, mesmo_dia_semana=False):
-    """Quantis do erro % por métrica x subsistema x h, nas rodadas da mesma época do ano (janela móvel),
-    e o fator para aplicar à previsão: carga do cenário = previsão x fator."""
-    x = longo[_na_janela(longo.rodada, ref, janela, mesmo_dia_semana)]
-    g = x.groupby(["metrica", "subsistema", "h"])
-    q = g.erro_pct.quantile(QUANTIS_CEN).unstack()
-    q.columns = [f"p{int(round(100 * c)):02d}_pct" for c in q.columns]
-    t = pd.DataFrame({"n_dias": g.size(), "n_anos": g.ano.nunique(), "vies_pct": g.erro_pct.mean()}).join(q)
-    for c in q.columns:
-        t[f"fator_{c[:-4]}"] = 1 / (1 + t[c] / 100)
-    return t.reset_index()
+def _centro_doy(datas, passo=PASSO_CENTRO):
+    """Centro de época (a cada `passo` dias do ano) de cada data."""
+    return ((datas.dt.dayofyear - 1) // passo) * passo + 1 + passo // 2
 
 
-def trajetorias(longo, ref, janela, mesmo_dia_semana=False):
-    """Semanas reais de erro (D+1..D+7 de uma mesma rodada, todos os subsistemas e as duas métricas juntos),
-    das rodadas da mesma época do ano. Ordenadas pelo erro médio da semana no SIN (média diária)."""
-    x = longo[_na_janela(longo.rodada, ref, janela, mesmo_dia_semana)]
-    tab = x.pivot_table(index=["rodada", "metrica", "subsistema"], columns="h", values="erro_pct")
-    tab = tab.reindex(columns=list(HORIZONTES)).dropna()
-    n = tab.groupby(level="rodada").size()
-    tab = tab[tab.index.get_level_values("rodada").isin(n[n == 2 * len(SUBS)].index)]
-    if tab.empty:
-        return tab, pd.Series(dtype=float)
-    nota = tab.xs(("media", "SIN"), level=("metrica", "subsistema")).mean(axis=1).sort_values()
-    return tab, nota
+def _data_centro(c):
+    return pd.Timestamp(2001, 1, 1) + pd.Timedelta(days=int(c) - 1)
 
 
-# cenários semanais = MÉDIA das semanas reais numa faixa de posição (erro médio semanal baixo = carga alta).
-# Uma semana isolada é uma amostra só (o caminho dia a dia dela é ruído); a média do grupo mantém a coerência
-# da semana (todas foram altas, ou baixas) e cancela as idiossincrasias de cada uma.
-GRUPOS_SEMANA = [("estresse alto", 0.00, 0.05), ("alto", 0.05, 0.15), ("central", 0.40, 0.60),
-                 ("baixo", 0.85, 0.95), ("estresse baixo", 0.95, 1.00)]
+def _mais_proximo(c, disponiveis):
+    disp = np.asarray(sorted(set(disponiveis)))
+    d = np.abs(disp - c)
+    return int(disp[np.argmin(np.minimum(d, 365 - d))])
 
 
-def grupos_semana(nota):
-    """{cenário: [rodadas]} pela posição (0 a 1) do erro médio semanal entre as semanas da janela."""
-    pos = (nota.rank(method="first") - 0.5) / len(nota)
-    return {nome: list(pos[(pos >= lo) & ((pos < hi) | (hi >= 1))].index) for nome, lo, hi in GRUPOS_SEMANA}
+def base_cenarios(longo):
+    """Dias normais com r = ajuste % para chegar ao oficial e o centro de época da rodada."""
+    x = longo[longo.tipo_dia.isin(TIPOS_NORMAIS)].copy()
+    x["r"] = 100 * (x.ofi / x.prev - 1)
+    x["centro"] = _centro_doy(x.rodada)
+    return x
+
+
+def _suavizar(e):
+    """D+2..D+7: centro linear em h, largura a + b·sqrt(h) (sem saltos entre antecedências vizinhas)."""
+    partes = []
+    for _, g in e.groupby(["centro", "metrica", "subsistema"]):
+        g = g.sort_values("h").copy()
+        g["mu"], g["sigma"] = g.mu_bruto, g.sigma_bruto
+        m = (g.h >= 2) & g.sigma_bruto.notna()
+        if m.sum() >= 3:
+            h = g.h[m].to_numpy(float)
+            cm = np.linalg.lstsq(np.c_[np.ones_like(h), h], g.mu_bruto[m].to_numpy(), rcond=None)[0]
+            cs = np.linalg.lstsq(np.c_[np.ones_like(h), np.sqrt(h)], g.sigma_bruto[m].to_numpy(), rcond=None)[0]
+            if cs[1] < 0:                                  # largura tem de crescer com h
+                cs = [g.sigma_bruto[m].mean(), 0.0]
+            g.loc[m, "mu"] = cm[0] + cm[1] * h
+            g.loc[m, "sigma"] = np.maximum(cs[0] + cs[1] * np.sqrt(h), 1e-3)
+        partes.append(g)
+    return pd.concat(partes, ignore_index=True)
+
+
+def tabela_epoca(x, janela=JANELA_EPOCA):
+    partes = []
+    for c in CENTROS:
+        t = x[_na_janela(x.rodada, _data_centro(c), janela)]
+        if t.empty:
+            continue
+        g = t.groupby(["metrica", "subsistema", "h"]).r
+        q = g.quantile([0.25, 0.50, 0.75]).unstack()
+        partes.append(pd.DataFrame({"mu_bruto": q[0.50], "sigma_bruto": (q[0.75] - q[0.25]) / 1.349,
+                                    "n": g.size()}).reset_index().assign(centro=c))
+    return _suavizar(pd.concat(partes, ignore_index=True))
+
+
+def forma_caudas(x, epoca):
+    """Quantis de z = (r - centro)/largura, com todo o histórico, D+2..D+7 juntos."""
+    y = x[x.h >= 2].merge(epoca[["centro", "metrica", "subsistema", "h", "mu", "sigma"]],
+                          on=["centro", "metrica", "subsistema", "h"])
+    y["z"] = (y.r - y.mu) / y.sigma
+    g = y.groupby(["metrica", "subsistema"]).z
+    f = g.quantile(QS).unstack()
+    f.columns = [f"z{c[1:]}" for c in PCOLS]
+    f["n_forma"] = g.size()
+    return f.reset_index()
+
+
+def modelo_d1(x, janela=JANELA_EPOCA):
+    """D+1 = ajuste do operador: chance de ajustar por época e tamanho do ajuste (histórico, escala da época)."""
+    d = x[x.h == 1].copy()
+    d["ajustou"] = d.erro_mw.abs() >= LIM_AJUSTE_MW
+    partes = []
+    for c in CENTROS:
+        t = d[_na_janela(d.rodada, _data_centro(c), janela)]
+        if t.empty:
+            continue
+        g = t.groupby(["metrica", "subsistema"])
+        escala = t[t.ajustou].groupby(["metrica", "subsistema"]).r.apply(lambda v: v.abs().median())
+        partes.append(pd.DataFrame({"p_ajuste": g.ajustou.mean(), "escala": escala, "n": g.size()})
+                      .reset_index().assign(centro=c))
+    ep = pd.concat(partes, ignore_index=True)
+    a = d[d.ajustou].merge(ep[["centro", "metrica", "subsistema", "escala"]], on=["centro", "metrica", "subsistema"])
+    a["u"] = a.r / a.escala
+    amostras = {k: np.sort(g.u.dropna().to_numpy()) for k, g in a.groupby(["metrica", "subsistema"])}
+    return ep, amostras
+
+
+def _quantis_d1(p, escala, S):
+    """Quantis da mistura: (1-p) dias sem ajuste (r = 0) + p dias com ajuste de tamanho escala x S."""
+    if S is None or len(S) < 10 or not np.isfinite(escala) or not p > 0:
+        return [0.0] * len(QS)
+    f0 = (S < 0).mean()
+    out = []
+    for q in QS:
+        if q < p * f0:
+            out.append(escala * np.quantile(S, q / p))
+        elif q <= p * f0 + (1 - p):
+            out.append(0.0)
+        else:
+            out.append(escala * np.quantile(S, min((q - (1 - p)) / p, 1.0)))
+    return out
+
+
+def semanas(x):
+    """W por rodada = r médio de D+1..D+7 (SIN, média diária), só semanas completas."""
+    s = x[(x.metrica == "media") & (x.subsistema == "SIN")].pivot_table(index="rodada", columns="h", values="r")
+    s = s.reindex(columns=list(HORIZONTES)).dropna()
+    w = s.mean(axis=1).rename("W").reset_index()
+    w["centro"] = _centro_doy(w.rodada)
+    return w
+
+
+def modelo_semana(x, epoca, janela=JANELA_EPOCA):
+    w = semanas(x)
+    partes = []
+    for c in CENTROS:
+        t = w[_na_janela(w.rodada, _data_centro(c), janela)]
+        if len(t) >= 10:
+            q25, q50, q75 = np.percentile(t.W, [25, 50, 75])
+            partes.append({"centro": c, "muW": q50, "sigmaW": max((q75 - q25) / 1.349, 1e-3), "nW": len(t)})
+    ew = pd.DataFrame(partes)
+    if ew.empty:
+        return ew, None, None, 0
+    w = w.merge(ew, on="centro")
+    zW = np.quantile((w.W - w.muW) / w.sigmaW, QS)
+    y = (x[x.rodada.isin(w.rodada)].merge(epoca[["centro", "metrica", "subsistema", "h", "mu"]],
+                                          on=["centro", "metrica", "subsistema", "h"])
+         .merge(w[["rodada", "W", "muW"]], on="rodada"))
+    y["d"], y["dW"] = y.r - y.mu, y.W - y.muW
+    beta = y.groupby(["metrica", "subsistema", "h"]).apply(
+        lambda g: (g.d * g.dW).sum() / (g.dW ** 2).sum(), include_groups=False).rename("beta").reset_index()
+    return ew, zW, beta, len(w)
+
+
+def ajustar_modelo(x, janela=JANELA_EPOCA):
+    ep = tabela_epoca(x, janela)
+    d1, am1 = modelo_d1(x, janela)
+    ew, zW, beta, n_sem = modelo_semana(x, ep, janela)
+    return {"epoca": ep, "forma": forma_caudas(x, ep), "d1": d1, "amostras_d1": am1,
+            "semana": ew, "zW": zW, "beta": beta, "n_semanas": n_sem, "n_dias": len(x)}
+
+
+def quantis_dia(mod):
+    """Quantis de r (%) por centro de época x métrica x subsistema x h."""
+    t = mod["epoca"][mod["epoca"].h >= 2].merge(mod["forma"], on=["metrica", "subsistema"], how="left")
+    for c in PCOLS:
+        t[c] = t.mu + t.sigma * t[f"z{c[1:]}"]
+    linhas = []
+    for _, z in mod["d1"].iterrows():
+        v = _quantis_d1(z.p_ajuste, z.escala, mod["amostras_d1"].get((z.metrica, z.subsistema)))
+        linhas.append({"centro": z.centro, "metrica": z.metrica, "subsistema": z.subsistema, "h": 1,
+                       "n": z.n, "p_ajuste": z.p_ajuste, **dict(zip(PCOLS, v))})
+    cols = ["centro", "metrica", "subsistema", "h", "n", "mu", "sigma"] + PCOLS
+    return pd.concat([t[cols], pd.DataFrame(linhas)], ignore_index=True)
+
+
+def cenarios_semana(mod, c):
+    """Para o centro de época c: W de cada quantil e o caminho dia a dia (r_h) de cada subsistema e métrica."""
+    ew = mod["semana"]
+    if ew is None or ew.empty:
+        return pd.DataFrame()
+    z = ew[ew.centro == _mais_proximo(c, ew.centro)].iloc[0]
+    ep = mod["epoca"][mod["epoca"].centro == _mais_proximo(c, mod["epoca"].centro)][["metrica", "subsistema", "h", "mu"]]
+    t = ep.merge(mod["beta"], on=["metrica", "subsistema", "h"])
+    partes = []
+    for q, zq in zip(QS, mod["zW"]):
+        Wq = z.muW + z.sigmaW * zq
+        partes.append(t.assign(cenario=ROT_Q[q], quantil=q, W=Wq, r=t.mu + t.beta * (Wq - z.muW)))
+    return pd.concat(partes, ignore_index=True)
 
 
 def ultima_rodada(prev):
@@ -877,12 +1015,7 @@ def ultima_rodada(prev):
     return d
 
 
-def _ajuste(erro_pct):
-    """Ajuste % sobre a previsão para chegar ao oficial: 100 x (1/(1+erro) - 1)  (erro -3 % -> +3,1 %)."""
-    return 100 * (1 / (1 + erro_pct / 100) - 1)
-
-
-def cenarios(longo, saida, ref=None, janela=15, mesmo_dia_semana=False, ult=None):
+def cenarios(longo, saida, ref=None, janela=JANELA_EPOCA, ult=None):
     arq_ult = saida / "ultima_rodada.csv"
     if ult is not None:
         _salvar(ult, arq_ult.name, saida)
@@ -890,204 +1023,186 @@ def cenarios(longo, saida, ref=None, janela=15, mesmo_dia_semana=False, ult=None
         ult = pd.read_csv(arq_ult, sep=";", decimal=",", encoding="utf-8-sig", parse_dates=["rodada", "dia"])
     if ref is None:
         ref = ult.rodada.iloc[0] if ult is not None and len(ult) else pd.Timestamp.today().normalize()
-    rotulo = f"rodadas a ±{janela} dias de {ref:%d/%m}" + (" no mesmo dia da semana" if mesmo_dia_semana else "")
+    x = base_cenarios(longo)
+    mod = ajustar_modelo(x, janela)
+    qd = quantis_dia(mod)
+    c = _mais_proximo(int(_centro_doy(pd.Series([ref])).iloc[0]), qd.centro)
+    dia = qd[qd.centro == c].drop(columns="centro")
+    sem = cenarios_semana(mod, c)
+    _salvar(dia, "cenarios_dia.csv", saida)
+    _salvar(sem, "cenarios_semana.csv", saida)
+    _salvar(qd, "cenarios_dia_todas_epocas.csv", saida)
 
-    fat = fatores_cenario(longo, ref, janela, mesmo_dia_semana)
-    for q in QUANTIS_CEN:
-        c = f"p{int(round(100 * q)):02d}"
-        fat[f"ajuste_{c}_pct"] = _ajuste(fat[f"{c}_pct"])
-    _salvar(fat, "cenarios_fatores.csv", saida)
-    tab, nota = trajetorias(longo, ref, janela, mesmo_dia_semana)
-    print("\n" + "=" * 96)
-    print(f"CENÁRIOS EM %  -  {rotulo}  ({fat.n_dias.min()}-{fat.n_dias.max()} dias por h, {fat.n_anos.max()} anos; "
-          f"{len(nota)} semanas completas)")
-    print("  valores = ajuste % sobre a previsão para chegar ao oficial:  carga do cenário = previsão x (1 + ajuste/100)")
-    print("  positivo = oficial acima da previsão.  P5/P10 = cenários altos, P50 = central, P90/P95 = cenários baixos")
-    amostra = longo[_na_janela(longo.rodada, ref, janela, mesmo_dia_semana) & (longo.metrica == "media")
-                    & (longo.subsistema == "SIN")]
-    por_ano = amostra[amostra.h == 1].groupby(amostra.rodada.dt.year).rodada.nunique()
-    print(f"  amostra (n): rodadas feitas entre {ref - pd.Timedelta(days=janela):%d/%m} e {ref + pd.Timedelta(days=janela):%d/%m}"
-          f" de cada ano, com o oficial do dia alvo disponível; rodadas por ano: {por_ano.to_dict()}")
-    print("  n = nº de dias (rodada -> dia alvo) com erro calculado naquela antecedência; cai em D+7 porque as rodadas"
-          " mais recentes ainda não têm o oficial de 7 dias à frente")
-    if len(nota) < 20:
-        print(f"  AVISO: só {len(nota)} semanas na janela -> quantis instáveis; aumentar --janela", flush=True)
-
-    datas = {}
-    if ult is not None and len(ult):
-        datas = ult.drop_duplicates("h").set_index("h").dia.to_dict()
+    print("\n" + "=" * 100)
+    print(f"CENÁRIOS EM % (método padronizado)  -  época de {ref:%d/%m}: rodadas a ±{janela} dias, todos os anos")
+    print(f"  r = ajuste sobre a previsão para chegar ao oficial; carga do cenário = previsão x (1 + r/100); "
+          f"positivo = oficial acima")
+    print(f"  centro e largura: época (n por h abaixo); formato das caudas: {mod['forma'].n_forma.max():,} dias do "
+          f"histórico; D+1: modelo do ajuste do operador")
+    datas = ult.drop_duplicates("h").set_index("h").dia.to_dict() if ult is not None and len(ult) else {}
+    tipos = {}
+    if datas:
+        td = tipo_dia(list(datas.values()), ler_feriados())
+        tipos = {h: td[d] for h, d in datas.items()}
     for m in ["media", "ponta"]:
-        t = fat[(fat.metrica == m) & (fat.subsistema == "SIN")].sort_values("h")
-        print(f"\nSIN - {'média' if m == 'media' else 'ponta'} diária: cenários dia a dia (% sobre a previsão)")
-        print(f"{'':>5}{'dia':>11}{'P5':>8}{'P10 alto':>10}{'P50':>8}{'P90 baixo':>11}{'P95':>8}{'n':>6}")
+        t = dia[(dia.metrica == m) & (dia.subsistema == "SIN")].sort_values("h")
+        print(f"\nSIN - {'média' if m == 'media' else 'ponta'} diária, cenários dia a dia (% sobre a previsão)")
+        print(f"{'':>5}{'dia':>11}{'P5':>11}{'P10':>9}{'P50':>9}{'P90':>9}{'P95':>10}{'n época':>9}")
+        print(f"{'':>16}{'est. baixo':>11}{'baixo':>9}{'central':>9}{'alto':>9}{'est. alto':>10}")
         for _, z in t.iterrows():
             d = f"{datas[z.h]:%a %d/%m}" if z.h in datas else ""
-            print(f"{'D+'+str(z.h):>5}{d:>11}{z.ajuste_p05_pct:>+8.1f}{z.ajuste_p10_pct:>+10.1f}{z.ajuste_p50_pct:>+8.1f}"
-                  f"{z.ajuste_p90_pct:>+11.1f}{z.ajuste_p95_pct:>+8.1f}{z.n_dias:>6}")
-    if tab.empty:
-        print("  sem trajetórias completas na janela")
-        return
-    traj = tab.stack().rename("erro_pct").reset_index()
-    traj["ajuste_pct"] = _ajuste(traj.erro_pct)
-    traj["nota_semana_pct"] = traj.rodada.map(nota)
-    _salvar(traj, "cenarios_trajetorias.csv", saida)
-    grupos = grupos_semana(nota)
-    membros = pd.DataFrame([{"cenario": g, "rodada": r, "nota_semana_pct": nota[r]} for g, rs in grupos.items() for r in rs])
-    _salvar(membros, "cenarios_semana_membros.csv", saida)
-    t_esc = pd.concat([traj[traj.rodada.isin(rs)].groupby(["metrica", "subsistema", "h"]).ajuste_pct.mean().reset_index()
-                       .assign(cenario=g, n_semanas=len(rs)) for g, rs in grupos.items() if rs], ignore_index=True)
-    _salvar(t_esc, "cenarios_semana.csv", saida)
-
-    print("\nSIN - semana inteira por cenário (média das semanas reais de cada faixa; % sobre a previsão)")
-    print(f"{'cenário':<16}{'faixa':>11}{'semanas':>9}" + "".join(f"{'D+'+str(h):>7}" for h in HORIZONTES) +
-          f"{'média sem.':>12}{'ponta sem.':>12}")
-    sin = t_esc[t_esc.subsistema == "SIN"]
-    for g, lo, hi in GRUPOS_SEMANA:
-        zm = sin[(sin.cenario == g) & (sin.metrica == "media")].sort_values("h")
-        zp = sin[(sin.cenario == g) & (sin.metrica == "ponta")].sort_values("h")
-        if zm.empty:
-            continue
-        faixa = f"P{100 * lo:.0f}-P{100 * hi:.0f}"
-        print(f"{g:<16}{faixa:>11}{len(grupos[g]):>9}" + "".join(f"{v:>+7.1f}" for v in zm.ajuste_pct) +
-              f"{zm.ajuste_pct.mean():>+12.1f}{zp.ajuste_pct.mean():>+12.1f}")
-    pouco = [g for g, rs in grupos.items() if len(rs) < 4]
-    if pouco:
-        print(f"  AVISO: {pouco} com menos de 4 semanas -> cenário ainda ruidoso; aumentar --janela")
-    print("Dia a dia (quantis) serve para um dia isolado. Para a semana, use os cenários semanais: aplicar o P10"
-          " em todos os dias exagera (dias seguidos raramente ficam todos no extremo). As semanas de cada"
-          " faixa estão em cenarios_semana_membros.csv.")
-
+            extra = f"   operador ajusta em {100 * z.p_ajuste:.0f} % dos dias" if z.h == 1 and pd.notna(z.get("p_ajuste")) else ""
+            if z.h in tipos and tipos[z.h] not in TIPOS_NORMAIS:
+                extra += f"   ATENÇÃO: {tipos[z.h]} - o cenário é de dia normal e não cobre o efeito do feriado"
+            print(f"{'D+'+str(int(z.h)):>5}{d:>11}{z.p05:>+11.1f}{z.p10:>+9.1f}{z.p50:>+9.1f}{z.p90:>+9.1f}{z.p95:>+10.1f}"
+                  f"{int(z.n):>9}{extra}")
+    if not sem.empty:
+        s = sem[sem.subsistema == "SIN"]
+        print(f"\nSIN - semana inteira (energia da semana e caminho dia a dia; % sobre a previsão; "
+              f"{mod['n_semanas']} semanas no histórico)")
+        print(f"{'cenário':<22}{'semana':>8}" + "".join(f"{'D+'+str(h):>7}" for h in HORIZONTES) + f"{'ponta sem.':>12}")
+        for q in sorted(QS, reverse=True):
+            zm = s[(s.quantil == q) & (s.metrica == "media")].sort_values("h")
+            zp = s[(s.quantil == q) & (s.metrica == "ponta")].sort_values("h")
+            print(f"{ROT_Q[q] + f' (P{int(round(100 * q))})':<22}{zm.W.iloc[0]:>+8.1f}" +
+                  "".join(f"{v:>+7.1f}" for v in zm.r) + f"{zp.r.mean():>+12.1f}")
+        print("'semana' = ajuste médio da semana (energia). Dia a dia serve para um dia isolado; para a semana use estes"
+              " cenários (aplicar o P90 em todos os dias exagera).")
     if ult is not None and len(ult):
-        # cenários aplicados à rodada mais recente (CSV, para quem quiser em MW)
-        ap_q = ult.merge(fat, on=["metrica", "subsistema", "h"], how="left")
-        for q in QUANTIS_CEN:
-            c = f"p{int(round(100 * q)):02d}"
-            ap_q[f"carga_{c}_mw"] = ap_q.prev_mw * (1 + ap_q[f"ajuste_{c}_pct"] / 100)
-        _salvar(ap_q, "cenarios_aplicados_quantis.csv", saida)
-        ap_s = ult.merge(t_esc, on=["metrica", "subsistema", "h"], how="left")
-        ap_s["carga_mw"] = ap_s.prev_mw * (1 + ap_s.ajuste_pct / 100)
-        _salvar(ap_s, "cenarios_aplicados_semana.csv", saida)
-    grafico_cenarios(fat, t_esc, saida, ref, rotulo)
+        ap = ult.merge(dia, on=["metrica", "subsistema", "h"], how="left")
+        for p in PCOLS:
+            ap[f"carga_{p}_mw"] = ap.prev_mw * (1 + ap[p] / 100)
+        _salvar(ap, "cenarios_aplicados_dia.csv", saida)
+        if not sem.empty:
+            aps = ult.merge(sem, on=["metrica", "subsistema", "h"], how="left")
+            aps["carga_mw"] = aps.prev_mw * (1 + aps.r / 100)
+            _salvar(aps, "cenarios_aplicados_semana.csv", saida)
+    grafico_cenarios(dia, sem, saida, ref, janela)
+    return mod
 
 
-def grafico_cenarios(fat, t_esc, saida, ref, rotulo, sub="SIN"):
+def grafico_cenarios(dia, sem, saida, ref, janela, sub="SIN"):
     fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), sharey=True)
     cor = "#2a78d6"
-    estilo = {"alto": ("#eb6834", "-"), "central": ("#52514e", "--"), "baixo": ("#1baf7a", "-")}
+    estilo = {0.90: ("#eb6834", "-"), 0.50: ("#52514e", "--"), 0.10: ("#1baf7a", "-")}
     for ax, m in zip(axs, ["media", "ponta"]):
-        t = fat[(fat.metrica == m) & (fat.subsistema == sub)].sort_values("h")
-        ax.fill_between(t.h, t.ajuste_p05_pct, t.ajuste_p95_pct, color=cor, alpha=0.13, lw=0, label="P5-P95 (dia a dia)")
-        ax.fill_between(t.h, t.ajuste_p10_pct, t.ajuste_p90_pct, color=cor, alpha=0.25, lw=0, label="P10-P90 (dia a dia)")
-        ax.plot(t.h, t.ajuste_p50_pct, color=cor, lw=2, marker="o", ms=4, label="P50 (dia a dia)")
-        for q, (c, ls) in estilo.items():
-            z = t_esc[(t_esc.metrica == m) & (t_esc.subsistema == sub) & (t_esc.cenario == q)].sort_values("h")
-            ax.plot(z.h, z.ajuste_pct, color=c, lw=1.5, ls=ls, label=f"semana: {q}")
+        t = dia[(dia.metrica == m) & (dia.subsistema == sub)].sort_values("h")
+        ax.fill_between(t.h, t.p05, t.p95, color=cor, alpha=0.13, lw=0, label="P5-P95 (dia a dia)")
+        ax.fill_between(t.h, t.p10, t.p90, color=cor, alpha=0.25, lw=0, label="P10-P90 (dia a dia)")
+        ax.plot(t.h, t.p50, color=cor, lw=2, marker="o", ms=4, label="P50 (dia a dia)")
+        if not sem.empty:
+            for q, (c, ls) in estilo.items():
+                z = sem[(sem.metrica == m) & (sem.subsistema == sub) & (sem.quantil == q)].sort_values("h")
+                ax.plot(z.h, z.r, color=c, lw=1.5, ls=ls, label=f"semana {ROT_Q[q]} (P{int(round(100 * q))})")
         ax.axhline(0, color="#52514e", lw=0.8)
         ax.set_title(f"{sub}  -  {'média' if m == 'media' else 'ponta'} diária", fontsize=10, loc="left")
         ax.set_xticks(list(HORIZONTES), [f"D+{h}" for h in HORIZONTES], fontsize=8)
         _estilo(ax)
     axs[0].set_ylabel("ajuste sobre a previsão (%)", fontsize=8)
     axs[0].legend(fontsize=7, frameon=False, loc="upper left")
-    fig.suptitle(f"Cenários em % sobre a previsão  -  {rotulo}  (positivo = oficial acima da previsão)",
-                 fontsize=10, x=0.01, ha="left")
+    fig.suptitle(f"Cenários em % sobre a previsão  -  época de {ref:%d/%m} (±{janela} dias)  "
+                 f"(positivo = oficial acima da previsão)", fontsize=10, x=0.01, ha="left")
     fig.tight_layout()
     fig.savefig(saida / f"cenarios_{ref:%Y%m%d}.png", dpi=130)
     plt.close(fig)
 
 
-# ------------------------------------------------------------------ calibração dos cenários (fora da amostra)
-def _centro_doy(datas, passo=7):
-    """Arredonda o dia do ano para o centro de janela mais próximo (a cada `passo` dias), para reaproveitar quantis."""
-    return ((datas.dt.dayofyear - 1) // passo) * passo + 1 + passo // 2
+# ------------------------------------------------------------------ calibração comparada (fora da amostra)
+def _quantis_empiricos(tr, centros, janela):
+    """Método antigo: quantis observados de r nas rodadas a ±janela dias (sem padronizar)."""
+    partes = []
+    for c in centros:
+        t = tr[_na_janela(tr.rodada, _data_centro(c), janela)]
+        if t.empty:
+            continue
+        q = t.groupby(["metrica", "subsistema", "h"]).r.quantile(QS).unstack()
+        q.columns = PCOLS
+        partes.append(q.reset_index().assign(centro=c))
+    return pd.concat(partes, ignore_index=True)
 
 
-def calibracao(longo, saida, janela=15, min_anos_treino=1):
-    """Para cada ano de teste Y: cenários calculados SÓ com dias anteriores a 01/01/Y (mesma janela de ±janela dias),
-    aplicados às rodadas de Y. Conta quantas vezes o oficial caiu dentro/fora de cada faixa. Esperado: 80 % dentro de
-    P10-P90, 90 % dentro de P5-P95, 10 % acima do cenário alto e 10 % abaixo do cenário baixo."""
-    anos = sorted(longo.rodada.dt.year.unique())
-    partes, sem_partes = [], []
-    # nota semanal de cada rodada (erro médio D+1..D+7, SIN, média diária) para calibrar os cenários semanais
-    x = longo[(longo.metrica == "media") & (longo.subsistema == "SIN")].pivot_table(index="rodada", columns="h", values="erro_pct")
-    nota = x.reindex(columns=list(HORIZONTES)).dropna().mean(axis=1)
-    for Y in anos:
+def _pinball(y, qv, q):
+    d = y - qv
+    return np.where(d >= 0, q * d, (q - 1) * d)
+
+
+def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
+    """Para cada ano de teste Y, os dois métodos são estimados SÓ com dias anteriores a 01/01/Y e aplicados às rodadas
+    de Y. Esperado: 80 % dentro de P10-P90, 90 % dentro de P5-P95, 10 % acima do alto (P90), 10 % abaixo do baixo (P10).
+    Pinball = perda quantílica média (menor = melhor; compara os métodos com um número só)."""
+    x = base_cenarios(longo)
+    partes, sem = [], []
+    nome_emp, nome_pad = f"empírico ±{janela_emp}d", "padronizado"
+    for Y in sorted(x.rodada.dt.year.unique()):
         corte = pd.Timestamp(Y, 1, 1)
-        tr = longo[longo.dia < corte]
-        if tr.ano.nunique() < min_anos_treino:
+        tr, te = x[x.dia < corte], x[x.rodada.dt.year == Y]
+        if te.empty or tr.empty or (tr.dia.max() - tr.dia.min()).days < 300:
             continue
-        te = longo[longo.rodada.dt.year == Y].copy()
-        if te.empty:
-            continue
-        te["centro"] = _centro_doy(te.rodada)
-        qs = []
-        for c in sorted(te.centro.unique()):
-            ref = pd.Timestamp(2001, 1, 1) + pd.Timedelta(days=int(c) - 1)
-            t = tr[_na_janela(tr.rodada, ref, janela)]
-            if t.empty:
-                continue
-            q = t.groupby(["metrica", "subsistema", "h"]).erro_pct.quantile([0.05, 0.10, 0.50, 0.90, 0.95]).unstack()
-            q.columns = ["q05", "q10", "q50", "q90", "q95"]
-            qs.append(q.assign(centro=c).reset_index())
-        if not qs:
-            continue
-        te = te.merge(pd.concat(qs), on=["centro", "metrica", "subsistema", "h"])
-        te["ano_teste"] = Y
-        te["anos_treino"] = f"{tr.ano.min()}-{tr.ano.max()}"
-        partes.append(te)
-        # semanas: nota da rodada de teste x quantis das notas de treino na janela
-        nt = nota[nota.index < corte - pd.Timedelta(days=7)]
-        for r, v in nota[nota.index.year == Y].items():
-            ref = pd.Timestamp(2001, 1, 1) + pd.Timedelta(days=r.dayofyear - 1)
-            amostra = nt[_na_janela(pd.Series(nt.index, index=nt.index), ref, janela).values]
-            if len(amostra) >= 10:
-                sem_partes.append({"ano_teste": Y, "rodada": r, "nota": v, "q10": amostra.quantile(0.10),
-                                   "q90": amostra.quantile(0.90), "n_treino": len(amostra)})
+        mod = ajustar_modelo(tr, janela)
+        for nome, Q in [(nome_emp, _quantis_empiricos(tr, sorted(te.centro.unique()), janela_emp)),
+                        (nome_pad, quantis_dia(mod))]:
+            m = te.merge(Q[["centro", "metrica", "subsistema", "h"] + PCOLS], on=["centro", "metrica", "subsistema", "h"])
+            partes.append(m.assign(metodo=nome, ano_teste=Y, treino=f"{tr.dia.min():%m/%Y}-{tr.dia.max():%m/%Y}"))
+        if mod["semana"] is not None and not mod["semana"].empty:
+            w = semanas(x)
+            w = w[w.rodada.dt.year == Y]
+            ew = mod["semana"]
+            w["c"] = w.centro.map(lambda c: _mais_proximo(c, ew.centro))
+            w = w.merge(ew, left_on="c", right_on="centro", suffixes=("", "_ep"))
+            w["q10"] = w.muW + w.sigmaW * mod["zW"][1]
+            w["q90"] = w.muW + w.sigmaW * mod["zW"][3]
+            sem.append(w.assign(ano_teste=Y))
     if not partes:
-        print("\ncalibração: histórico curto demais (precisa de pelo menos 1 ano antes do ano de teste)")
+        print("\ncalibração: histórico curto demais (precisa de cerca de 1 ano antes do ano de teste)")
         return
-    te = pd.concat(partes, ignore_index=True)
-    te["dentro_80"] = te.erro_pct.between(te.q10, te.q90)
-    te["dentro_90"] = te.erro_pct.between(te.q05, te.q95)
-    te["acima_cen_alto"] = te.erro_pct < te.q10          # oficial ainda mais alto que o cenário alto (P10)
-    te["abaixo_cen_baixo"] = te.erro_pct > te.q90        # oficial ainda mais baixo que o cenário baixo (P90)
-    te["abaixo_mediana"] = te.erro_pct < te.q50
+    m = pd.concat(partes, ignore_index=True)
+    m["dentro_80"] = m.r.between(m.p10, m.p90)
+    m["dentro_90"] = m.r.between(m.p05, m.p95)
+    m["acima_alto"] = m.r > m.p90
+    m["abaixo_baixo"] = m.r < m.p10
+    m["pinball"] = np.mean([_pinball(m.r, m[p], q) for p, q in zip(PCOLS, QS)], axis=0)
 
     def resumo(chaves):
-        g = te.groupby(chaves)
+        g = m.groupby(chaves)
         return pd.DataFrame({"n": g.size(), "dentro_P10_P90_pct": 100 * g.dentro_80.mean(),
                              "dentro_P5_P95_pct": 100 * g.dentro_90.mean(),
-                             "oficial_acima_do_cenario_alto_pct": 100 * g.acima_cen_alto.mean(),
-                             "oficial_abaixo_do_cenario_baixo_pct": 100 * g.abaixo_cen_baixo.mean()}).reset_index()
-    cal_h = resumo(["metrica", "subsistema", "h"])
-    cal_ano = resumo(["ano_teste", "anos_treino", "metrica", "subsistema"])
+                             "acima_do_alto_pct": 100 * g.acima_alto.mean(), "abaixo_do_baixo_pct": 100 * g.abaixo_baixo.mean(),
+                             "pinball": g.pinball.mean()}).reset_index()
+    cal_h = resumo(["metodo", "metrica", "subsistema", "h"])
+    cal_ano = resumo(["metodo", "ano_teste", "treino", "metrica", "subsistema"])
     _salvar(cal_h, "calibracao_horizonte.csv", saida)
     _salvar(cal_ano, "calibracao_ano.csv", saida)
 
-    print("\n" + "=" * 96)
-    print("CALIBRAÇÃO DOS CENÁRIOS (fora da amostra: cada ano testado com cenários calculados só com os anos anteriores)")
-    print("  esperado: 80 % dentro de P10-P90 | 90 % dentro de P5-P95 | 10 % acima do cenário alto | 10 % abaixo do baixo")
-    print("  bem menos que 80 % dentro -> faixas estreitas (otimistas); bem mais -> largas demais (conservadoras)")
-    for m in ["media", "ponta"]:
-        t = cal_h[(cal_h.metrica == m) & (cal_h.subsistema == "SIN")]
-        print(f"\nSIN - {'média' if m == 'media' else 'ponta'} diária (todos os anos de teste juntos)")
-        print(f"{'h':>5}{'n':>6}{'dentro P10-P90':>16}{'dentro P5-P95':>15}{'acima do alto':>15}{'abaixo do baixo':>17}")
-        for _, z in t.iterrows():
-            print(f"{'D+'+str(z.h):>5}{z.n:>6}{z.dentro_P10_P90_pct:>15.0f}%{z.dentro_P5_P95_pct:>14.0f}%"
-                  f"{z.oficial_acima_do_cenario_alto_pct:>14.0f}%{z.oficial_abaixo_do_cenario_baixo_pct:>16.0f}%")
+    print("\n" + "=" * 100)
+    print("CALIBRAÇÃO FORA DA AMOSTRA: cada ano testado com o método estimado só com os dados anteriores")
+    print("  esperado: dentro P10-P90 = 80 % | acima do alto (P90) = 10 % | abaixo do baixo (P10) = 10 % | pinball: menor = melhor")
+    for mt in ["media", "ponta"]:
+        print(f"\nSIN - {'média' if mt == 'media' else 'ponta'} diária")
+        print(f"{'':>5}" + "".join(f"{n:>34}" for n in (nome_emp, nome_pad)))
+        print(f"{'h':>5}" + f"{'n':>6}{'dentro':>8}{'acima':>7}{'abaixo':>7}{'pinball':>9}" * 2)
+        for h in HORIZONTES:
+            linha = f"{'D+'+str(h):>5}"
+            for nome in (nome_emp, nome_pad):
+                z = cal_h[(cal_h.metodo == nome) & (cal_h.metrica == mt) & (cal_h.subsistema == "SIN") & (cal_h.h == h)]
+                if z.empty:
+                    linha += f"{'-':>37}"
+                    continue
+                z = z.iloc[0]
+                linha += (f"{z.n:>6}{z.dentro_P10_P90_pct:>7.0f}%{z.acima_do_alto_pct:>6.0f}%{z.abaixo_do_baixo_pct:>6.0f}%"
+                          f"{z.pinball:>9.3f}")
+            print(linha)
     t = cal_ano[cal_ano.subsistema == "SIN"]
-    print("\nSIN por ano de teste (todas as antecedências juntas)")
-    print(f"{'ano':>6}{'treino':>12}{'métrica':>9}{'n':>7}{'dentro P10-P90':>16}{'acima do alto':>15}{'abaixo do baixo':>17}")
+    print("\nSIN por ano de teste (todas as antecedências)")
+    print(f"{'método':>16}{'ano':>6}{'treino':>17}{'métrica':>9}{'n':>7}{'dentro':>8}{'acima':>7}{'abaixo':>7}{'pinball':>9}")
     for _, z in t.iterrows():
-        print(f"{z.ano_teste:>6}{z.anos_treino:>12}{z.metrica:>9}{z.n:>7}{z.dentro_P10_P90_pct:>15.0f}%"
-              f"{z.oficial_acima_do_cenario_alto_pct:>14.0f}%{z.oficial_abaixo_do_cenario_baixo_pct:>16.0f}%")
-    if sem_partes:
-        sp = pd.DataFrame(sem_partes)
-        sp["dentro"] = sp.nota.between(sp.q10, sp.q90)
+        print(f"{z.metodo:>16}{z.ano_teste:>6}{z.treino:>17}{z.metrica:>9}{z.n:>7}{z.dentro_P10_P90_pct:>7.0f}%"
+              f"{z.acima_do_alto_pct:>6.0f}%{z.abaixo_do_baixo_pct:>6.0f}%{z.pinball:>9.3f}")
+    if sem:
+        sp = pd.concat(sem, ignore_index=True)
         _salvar(sp, "calibracao_semanas.csv", saida)
-        print(f"\nSemanas (erro médio da semana, SIN, média diária): {len(sp)} semanas de teste; "
-              f"dentro P10-P90 = {100 * sp.dentro.mean():.0f} % (esperado 80 %); "
-              f"acima do cenário alto = {100 * (sp.nota < sp.q10).mean():.0f} %; "
-              f"abaixo do baixo = {100 * (sp.nota > sp.q90).mean():.0f} % (esperado 10 % cada)")
+        print(f"\nSemanas (padronizado; ajuste médio da semana, SIN): {len(sp)} semanas de teste; dentro P10-P90 = "
+              f"{100 * sp.W.between(sp.q10, sp.q90).mean():.0f} % (esperado 80); acima do alto = "
+              f"{100 * (sp.W > sp.q90).mean():.0f} %; abaixo do baixo = {100 * (sp.W < sp.q10).mean():.0f} % (esperado 10 cada)")
 
 
 # ------------------------------------------------------------------ principal
@@ -1104,8 +1219,8 @@ def main():
                                                    "'' desliga")
     ap.add_argument("--sub", default="SIN", choices=SUBS, help="subsistema impresso no relatório em GW")
     ap.add_argument("--data-ref", default=None, help="data de referência dos cenários (padrão: rodada mais recente)")
-    ap.add_argument("--janela", type=int, default=15, help="janela dos cenários: ± dias em torno da data, todos os anos")
-    ap.add_argument("--mesmo-dia-semana", action="store_true", help="cenários só com rodadas do mesmo dia da semana")
+    ap.add_argument("--janela", type=int, default=JANELA_EPOCA,
+                    help="cenários: ± dias em torno da data (todos os anos) para o centro e a largura da época")
     ap.add_argument("--so-relatorio", action="store_true",
                     help="não consulta o banco: refaz só o relatório em GW a partir do erro_diario.csv já gerado")
     a = ap.parse_args()
@@ -1120,7 +1235,7 @@ def main():
         longo = longo_diario(excluir_dias(ler_erro_diario(saida)))
         piores_dias(longo, saida, sub=a.sub)
         relatorio_gw(longo, a.mes, dias, saida, a.sub)
-        cenarios(longo, saida, ref, a.janela, a.mesmo_dia_semana)
+        cenarios(longo, saida, ref, a.janela)
         calibracao(longo, saida, a.janela)
         print(f"\nsaídas em {saida}", flush=True)
         return
@@ -1182,7 +1297,7 @@ def main():
     imprimir_resumo(quadro, "todos")
     piores_dias(longo, saida, sub=a.sub)
     relatorio_gw(longo, a.mes, dias, saida, a.sub)
-    cenarios(longo, saida, ref, a.janela, a.mesmo_dia_semana, ult=ultima_rodada(prev))
+    cenarios(longo, saida, ref, a.janela, ult=ultima_rodada(prev))
     calibracao(longo, saida, a.janela)
     print(f"\nsaídas em {saida}", flush=True)
 

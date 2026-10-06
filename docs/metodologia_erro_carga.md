@@ -110,42 +110,47 @@ indica mudança de modelo ou de metodologia da carga. Nesse caso, restrinja o pe
 - Decomposição `previsto - realizado = (previsto - oficial) + (oficial - realizado)`: basta rodar com
   `--oficial realizado` e comparar com o resultado do deck.
 
-## 8. Cenários (teste de sensibilidade), em %
+## 8. Cenários de sensibilidade (método padronizado)
 
-Os cenários são dados como **ajuste % sobre a previsão**, para chegar ao oficial:
-`carga do cenário = previsão x (1 + ajuste/100)`, com `ajuste = 100 x (1/(1+erro) - 1)`.
-Positivo quer dizer oficial acima da previsão. A amostra são as rodadas a ±`--janela` dias (padrão 15) da data
-de referência, em todos os anos. A data de referência padrão é a rodada mais recente.
+**Unidade:** `r = 100 x (oficial / previsão - 1)`, o ajuste % que leva a previsão ao oficial.
+`carga do cenário = previsão x (1 + r/100)`. Positivo quer dizer oficial acima da previsão.
+P90/P95 são os cenários altos e P10/P5 os baixos. A estimação usa só dias normais (útil, sábado, domingo).
 
-- **Dia a dia:** quantis P5, P10, P50, P90 e P95 do ajuste, por métrica, subsistema e h (`cenarios_fatores.csv`).
-  P5 e P10 são os cenários altos, P90 e P95 os baixos.
-- **Semana inteira:** semanas reais de erro (D+1..D+7 da mesma rodada, todos os subsistemas juntos) ordenadas pelo
-  erro médio da semana no SIN. Cada cenário é a **média das semanas de uma faixa**: estresse alto (< P5), alto
-  (P5-P15), central (P40-P60), baixo (P85-P95) e estresse baixo (> P95). Saem em `cenarios_semana.csv`, com os membros
-  de cada faixa em `cenarios_semana_membros.csv`. Uma semana isolada não serve: o ranking só controla a média da
-  semana, e o caminho dia a dia dela é ruído (por exemplo, uma semana de estresse alto com D+7 quase zero). A média
-  do grupo cancela esse ruído e mantém a coerência (todas as semanas foram altas, ou baixas). Com poucas semanas por
-  faixa (menos de 4), o script avisa: aumente `--janela`.
-- `cenarios_aplicados_*.csv` aplica os cenários à rodada mais recente (MW), para uso direto.
-- `--mesmo-dia-semana` restringe a amostra a rodadas do mesmo dia da semana (amostra cerca de 7x menor).
+**Por que este método.** A previsão só existe desde 24/10/2023. Uma janela sazonal tem uns 65-160 dias por
+antecedência, o que basta para centro e largura, mas não para as caudas (P5/P95 ficam com uns 3 pontos). E um
+cenário semanal tirado de semanas isoladas (cerca de 40 semanas por janela) dá caminhos incoerentes. Por isso cada
+parte é estimada com a quantidade de dado que exige:
 
-## 9. Calibração dos cenários (fora da amostra)
+| Parte | Como | Dados |
+|---|---|---|
+| Centro e largura da época | mediana e IQR/1,349 de r nas rodadas a ±30 dias da data, todos os anos; suavizados em h (centro linear em h, largura `a + b·sqrt(h)`) | ~160 dias por h |
+| Formato das caudas | quantis de `z = (r - centro)/largura`, todo o histórico, D+2..D+7 juntos (preserva a assimetria) | ~6.000 dias |
+| D+1 (ajuste do operador) | mistura: chance de ajustar (época, `|oficial - previsão| >= 10 MW`) x tamanho do ajuste (histórico, na escala da época) | todo o histórico |
+| Semana | `W` = r médio de D+1..D+7 (SIN, média diária); quantis de W pelo mesmo método (centro e largura da época, formato do histórico) | ~900 semanas |
+| Caminho da semana | `r_h = centro_h + beta_h x (W - centro_W)`, com beta_h por subsistema e métrica estimado com todas as semanas | ~900 semanas |
 
-O teste simula o uso real. Para cada ano de teste Y, os cenários são calculados **só com os dias anteriores a
-01/01/Y** (mesma janela de ±`--janela` dias) e aplicados às rodadas de Y. Depois, conta-se onde o oficial caiu:
+Cenário de um dia: `r_p(h) = centro_época(h) + largura_época(h) x z_p`. O cenário da semana dá o ajuste da energia
+da semana (W) e o caminho dia a dia coerente com ele, para cada subsistema.
 
-| Saída | Esperado |
+Dias da semana prevista que são feriado, ponte ou especial são sinalizados no terminal: o cenário é de dia normal.
+
+Saídas: `cenarios_dia.csv`, `cenarios_semana.csv`, `cenarios_dia_todas_epocas.csv` (todas as épocas do ano),
+`cenarios_aplicados_dia.csv` e `cenarios_aplicados_semana.csv` (a rodada mais recente em MW), `cenarios_<data>.png`.
+Janela da época: `--janela` (padrão 30).
+
+## 9. Calibração comparada (fora da amostra)
+
+Para cada ano de teste Y, os métodos são estimados **só com os dias anteriores a 01/01/Y** e aplicados às rodadas
+de Y. São comparados o método padronizado e o empírico (quantis observados na janela de ±15 dias).
+
+| Critério | Esperado |
 |---|---|
 | dentro de P10-P90 | 80 % |
 | dentro de P5-P95 | 90 % |
-| oficial acima do cenário alto (erro < P10) | 10 % |
-| oficial abaixo do cenário baixo (erro > P90) | 10 % |
+| oficial acima do alto (r > P90) | 10 % |
+| oficial abaixo do baixo (r < P10) | 10 % |
+| pinball (perda quantílica média em P5..P95) | menor = melhor |
 
-Como ler:
-- Bem menos de 80 % dentro: as faixas são otimistas e precisam ser alargadas.
-- Bem mais de 80 % dentro: as faixas são conservadoras.
-- "Acima do alto" bem acima de 10 %: o cenário alto é insuficiente.
-
-Mesmo com erro estável ao longo do tempo, a cobertura fica um pouco abaixo do nominal (cerca de 76-79 %), porque os
-quantis são estimados com amostra finita. Os cenários semanais são testados da mesma forma (erro médio da semana).
-Saídas: `calibracao_horizonte.csv`, `calibracao_ano.csv`, `calibracao_semanas.csv`.
+Os cenários semanais são testados da mesma forma (W contra P10-P90 de W). Saídas: `calibracao_horizonte.csv`,
+`calibracao_ano.csv` e `calibracao_semanas.csv`. Com o histórico atual, os anos de teste são 2025 e 2026: o resultado
+é indicativo e fica mais firme a cada mês de dado novo.
