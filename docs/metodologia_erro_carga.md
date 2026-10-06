@@ -125,3 +125,24 @@ de referência, em todos os anos. A data de referência padrão é a rodada mais
   de cada dia na semana inteira exageraria.
 - `cenarios_aplicados_*.csv` aplica os cenários à rodada mais recente (MW), para uso direto.
 - `--mesmo-dia-semana` restringe a amostra a rodadas do mesmo dia da semana (amostra cerca de 7x menor).
+
+## 9. Calibração dos cenários (fora da amostra)
+
+O teste simula o uso real. Para cada ano de teste Y, os cenários são calculados **só com os dias anteriores a
+01/01/Y** (mesma janela de ±`--janela` dias) e aplicados às rodadas de Y. Depois, conta-se onde o oficial caiu:
+
+| Saída | Esperado |
+|---|---|
+| dentro de P10-P90 | 80 % |
+| dentro de P5-P95 | 90 % |
+| oficial acima do cenário alto (erro < P10) | 10 % |
+| oficial abaixo do cenário baixo (erro > P90) | 10 % |
+
+Como ler:
+- Bem menos de 80 % dentro: as faixas são otimistas e precisam ser alargadas.
+- Bem mais de 80 % dentro: as faixas são conservadoras.
+- "Acima do alto" bem acima de 10 %: o cenário alto é insuficiente.
+
+Mesmo com erro estável ao longo do tempo, a cobertura fica um pouco abaixo do nominal (cerca de 76-79 %), porque os
+quantis são estimados com amostra finita. Os cenários semanais são testados da mesma forma (erro médio da semana).
+Saídas: `calibracao_horizonte.csv`, `calibracao_ano.csv`, `calibracao_semanas.csv`.

@@ -37,6 +37,8 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     cenarios_trajetorias.csv   semanas reais de erro (D+1..D+7, todos os subsistemas) dessa época do ano
     cenarios_semana_escolhidos.csv   semanas P5/P10/P50/P90/P95 pelo erro médio semanal do SIN
     cenarios_aplicados_quantis.csv / _semana.csv / cenarios_<rodada>.png   cenários aplicados à rodada mais recente
+    calibracao_*.csv           CALIBRAÇÃO dos cenários fora da amostra (cada ano testado com cenários dos anos anteriores):
+                               % de dias dentro de P10-P90 (esperado 80) e P5-P95 (90), acima do alto, abaixo do baixo
     piores_dias.csv            30 maiores erros por métrica e subsistema, com o erro de cada subsistema ao lado
                                (para achar dado ruim; dias a descartar vão em dias_excluidos.csv: dia;motivo)
     quadro_agregado.csv        TODO O HISTÓRICO por antecedência, em GW e %: viés, IC, desvio, MAPE, faixa P5-P95
@@ -979,6 +981,101 @@ def grafico_cenarios(fat, t_esc, saida, ref, rotulo, sub="SIN"):
     plt.close(fig)
 
 
+# ------------------------------------------------------------------ calibração dos cenários (fora da amostra)
+def _centro_doy(datas, passo=7):
+    """Arredonda o dia do ano para o centro de janela mais próximo (a cada `passo` dias), para reaproveitar quantis."""
+    return ((datas.dt.dayofyear - 1) // passo) * passo + 1 + passo // 2
+
+
+def calibracao(longo, saida, janela=15, min_anos_treino=1):
+    """Para cada ano de teste Y: cenários calculados SÓ com dias anteriores a 01/01/Y (mesma janela de ±janela dias),
+    aplicados às rodadas de Y. Conta quantas vezes o oficial caiu dentro/fora de cada faixa. Esperado: 80 % dentro de
+    P10-P90, 90 % dentro de P5-P95, 10 % acima do cenário alto e 10 % abaixo do cenário baixo."""
+    anos = sorted(longo.rodada.dt.year.unique())
+    partes, sem_partes = [], []
+    # nota semanal de cada rodada (erro médio D+1..D+7, SIN, média diária) para calibrar os cenários semanais
+    x = longo[(longo.metrica == "media") & (longo.subsistema == "SIN")].pivot_table(index="rodada", columns="h", values="erro_pct")
+    nota = x.reindex(columns=list(HORIZONTES)).dropna().mean(axis=1)
+    for Y in anos:
+        corte = pd.Timestamp(Y, 1, 1)
+        tr = longo[longo.dia < corte]
+        if tr.ano.nunique() < min_anos_treino:
+            continue
+        te = longo[longo.rodada.dt.year == Y].copy()
+        if te.empty:
+            continue
+        te["centro"] = _centro_doy(te.rodada)
+        qs = []
+        for c in sorted(te.centro.unique()):
+            ref = pd.Timestamp(2001, 1, 1) + pd.Timedelta(days=int(c) - 1)
+            t = tr[_na_janela(tr.rodada, ref, janela)]
+            if t.empty:
+                continue
+            q = t.groupby(["metrica", "subsistema", "h"]).erro_pct.quantile([0.05, 0.10, 0.50, 0.90, 0.95]).unstack()
+            q.columns = ["q05", "q10", "q50", "q90", "q95"]
+            qs.append(q.assign(centro=c).reset_index())
+        if not qs:
+            continue
+        te = te.merge(pd.concat(qs), on=["centro", "metrica", "subsistema", "h"])
+        te["ano_teste"] = Y
+        te["anos_treino"] = f"{tr.ano.min()}-{tr.ano.max()}"
+        partes.append(te)
+        # semanas: nota da rodada de teste x quantis das notas de treino na janela
+        nt = nota[nota.index < corte - pd.Timedelta(days=7)]
+        for r, v in nota[nota.index.year == Y].items():
+            ref = pd.Timestamp(2001, 1, 1) + pd.Timedelta(days=r.dayofyear - 1)
+            amostra = nt[_na_janela(pd.Series(nt.index, index=nt.index), ref, janela).values]
+            if len(amostra) >= 10:
+                sem_partes.append({"ano_teste": Y, "rodada": r, "nota": v, "q10": amostra.quantile(0.10),
+                                   "q90": amostra.quantile(0.90), "n_treino": len(amostra)})
+    if not partes:
+        print("\ncalibração: histórico curto demais (precisa de pelo menos 1 ano antes do ano de teste)")
+        return
+    te = pd.concat(partes, ignore_index=True)
+    te["dentro_80"] = te.erro_pct.between(te.q10, te.q90)
+    te["dentro_90"] = te.erro_pct.between(te.q05, te.q95)
+    te["acima_cen_alto"] = te.erro_pct < te.q10          # oficial ainda mais alto que o cenário alto (P10)
+    te["abaixo_cen_baixo"] = te.erro_pct > te.q90        # oficial ainda mais baixo que o cenário baixo (P90)
+    te["abaixo_mediana"] = te.erro_pct < te.q50
+
+    def resumo(chaves):
+        g = te.groupby(chaves)
+        return pd.DataFrame({"n": g.size(), "dentro_P10_P90_pct": 100 * g.dentro_80.mean(),
+                             "dentro_P5_P95_pct": 100 * g.dentro_90.mean(),
+                             "oficial_acima_do_cenario_alto_pct": 100 * g.acima_cen_alto.mean(),
+                             "oficial_abaixo_do_cenario_baixo_pct": 100 * g.abaixo_cen_baixo.mean()}).reset_index()
+    cal_h = resumo(["metrica", "subsistema", "h"])
+    cal_ano = resumo(["ano_teste", "anos_treino", "metrica", "subsistema"])
+    _salvar(cal_h, "calibracao_horizonte.csv", saida)
+    _salvar(cal_ano, "calibracao_ano.csv", saida)
+
+    print("\n" + "=" * 96)
+    print("CALIBRAÇÃO DOS CENÁRIOS (fora da amostra: cada ano testado com cenários calculados só com os anos anteriores)")
+    print("  esperado: 80 % dentro de P10-P90 | 90 % dentro de P5-P95 | 10 % acima do cenário alto | 10 % abaixo do baixo")
+    print("  bem menos que 80 % dentro -> faixas estreitas (otimistas); bem mais -> largas demais (conservadoras)")
+    for m in ["media", "ponta"]:
+        t = cal_h[(cal_h.metrica == m) & (cal_h.subsistema == "SIN")]
+        print(f"\nSIN - {'média' if m == 'media' else 'ponta'} diária (todos os anos de teste juntos)")
+        print(f"{'h':>5}{'n':>6}{'dentro P10-P90':>16}{'dentro P5-P95':>15}{'acima do alto':>15}{'abaixo do baixo':>17}")
+        for _, z in t.iterrows():
+            print(f"{'D+'+str(z.h):>5}{z.n:>6}{z.dentro_P10_P90_pct:>15.0f}%{z.dentro_P5_P95_pct:>14.0f}%"
+                  f"{z.oficial_acima_do_cenario_alto_pct:>14.0f}%{z.oficial_abaixo_do_cenario_baixo_pct:>16.0f}%")
+    t = cal_ano[cal_ano.subsistema == "SIN"]
+    print("\nSIN por ano de teste (todas as antecedências juntas)")
+    print(f"{'ano':>6}{'treino':>12}{'métrica':>9}{'n':>7}{'dentro P10-P90':>16}{'acima do alto':>15}{'abaixo do baixo':>17}")
+    for _, z in t.iterrows():
+        print(f"{z.ano_teste:>6}{z.anos_treino:>12}{z.metrica:>9}{z.n:>7}{z.dentro_P10_P90_pct:>15.0f}%"
+              f"{z.oficial_acima_do_cenario_alto_pct:>14.0f}%{z.oficial_abaixo_do_cenario_baixo_pct:>16.0f}%")
+    if sem_partes:
+        sp = pd.DataFrame(sem_partes)
+        sp["dentro"] = sp.nota.between(sp.q10, sp.q90)
+        _salvar(sp, "calibracao_semanas.csv", saida)
+        print(f"\nSemanas (erro médio da semana, SIN, média diária): {len(sp)} semanas de teste; "
+              f"dentro P10-P90 = {100 * sp.dentro.mean():.0f} % (esperado 80 %); "
+              f"acima do cenário alto = {100 * (sp.nota < sp.q10).mean():.0f} %; "
+              f"abaixo do baixo = {100 * (sp.nota > sp.q90).mean():.0f} % (esperado 10 % cada)")
+
+
 # ------------------------------------------------------------------ principal
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1010,6 +1107,7 @@ def main():
         piores_dias(longo, saida, sub=a.sub)
         relatorio_gw(longo, a.mes, dias, saida, a.sub)
         cenarios(longo, saida, ref, a.janela, a.mesmo_dia_semana)
+        calibracao(longo, saida, a.janela)
         print(f"\nsaídas em {saida}", flush=True)
         return
     eng = None
@@ -1071,6 +1169,7 @@ def main():
     piores_dias(longo, saida, sub=a.sub)
     relatorio_gw(longo, a.mes, dias, saida, a.sub)
     cenarios(longo, saida, ref, a.janela, a.mesmo_dia_semana, ult=ultima_rodada(prev))
+    calibracao(longo, saida, a.janela)
     print(f"\nsaídas em {saida}", flush=True)
 
 
