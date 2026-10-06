@@ -132,6 +132,20 @@ parte é estimada com a quantidade de dado que exige:
 Cenário de um dia: `r_p(h) = centro_época(h) + largura_época(h) x z_p`. O cenário da semana dá o ajuste da energia
 da semana (W) e o caminho dia a dia coerente com ele, para cada subsistema.
 
+**Nível recente (`--nivel-recente`).** A calibração mostrou faixas largas demais, porque o erro do modelo vem
+diminuindo. Para corrigir sem perder a sazonalidade, a largura e o centro são separados em duas partes:
+
+`largura(época, h) = perfil sazonal(época, h) x nível atual(h)`
+
+- **Perfil sazonal:** vem de todos os anos (memória completa), como antes.
+- **Nível atual:** sai dos últimos `--dias-recentes` dias (padrão 365), em **todas as épocas**. É medido em
+  `z`, que já está sem sazonalidade: o deslocamento da mediana de z e a razão das larguras de z (recente / histórico).
+  Assim, uma estação não é confundida com melhora do modelo.
+
+No D+1 entram a taxa de ajuste e o tamanho do ajuste recentes; na semana, o centro e a largura de W recentes. Com
+menos de 60 dias recentes, o fator fica neutro. Como só olha para trás, o ajuste chega atrasado quando a melhora
+continua: menos dias acompanham mais rápido, com mais ruído.
+
 Dias da semana prevista que são feriado, ponte ou especial são sinalizados no terminal: o cenário é de dia normal.
 
 Saídas: `cenarios_dia.csv`, `cenarios_semana.csv`, `cenarios_dia_todas_epocas.csv` (todas as épocas do ano),
@@ -141,7 +155,8 @@ Janela da época: `--janela` (padrão 30).
 ## 9. Calibração comparada (fora da amostra)
 
 Para cada ano de teste Y, os métodos são estimados **só com os dias anteriores a 01/01/Y** e aplicados às rodadas
-de Y. São comparados o método padronizado e o empírico (quantis observados na janela de ±15 dias).
+de Y. São comparados três métodos: o empírico (quantis observados na janela de ±15 dias), o padronizado e o
+padronizado com nível recente. O terminal fecha com um resumo do SIN e indica o método de menor pinball.
 
 | Critério | Esperado |
 |---|---|
