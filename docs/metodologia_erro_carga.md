@@ -119,10 +119,13 @@ de referência, em todos os anos. A data de referência padrão é a rodada mais
 
 - **Dia a dia:** quantis P5, P10, P50, P90 e P95 do ajuste, por métrica, subsistema e h (`cenarios_fatores.csv`).
   P5 e P10 são os cenários altos, P90 e P95 os baixos.
-- **Semana inteira:** semanas reais de erro (D+1..D+7 da mesma rodada, todos os subsistemas juntos), ordenadas
-  pelo erro médio da semana no SIN. As semanas P5/P10/P50/P90/P95 viram os cenários semanais
-  (`cenarios_semana_escolhidos.csv`). Elas preservam a correlação entre dias e entre subsistemas; aplicar o P10
-  de cada dia na semana inteira exageraria.
+- **Semana inteira:** semanas reais de erro (D+1..D+7 da mesma rodada, todos os subsistemas juntos) ordenadas pelo
+  erro médio da semana no SIN. Cada cenário é a **média das semanas de uma faixa**: estresse alto (< P5), alto
+  (P5-P15), central (P40-P60), baixo (P85-P95) e estresse baixo (> P95). Saem em `cenarios_semana.csv`, com os membros
+  de cada faixa em `cenarios_semana_membros.csv`. Uma semana isolada não serve: o ranking só controla a média da
+  semana, e o caminho dia a dia dela é ruído (por exemplo, uma semana de estresse alto com D+7 quase zero). A média
+  do grupo cancela esse ruído e mantém a coerência (todas as semanas foram altas, ou baixas). Com poucas semanas por
+  faixa (menos de 4), o script avisa: aumente `--janela`.
 - `cenarios_aplicados_*.csv` aplica os cenários à rodada mais recente (MW), para uso direto.
 - `--mesmo-dia-semana` restringe a amostra a rodadas do mesmo dia da semana (amostra cerca de 7x menor).
 

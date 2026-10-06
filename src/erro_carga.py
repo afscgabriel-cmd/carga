@@ -35,7 +35,8 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     cenarios_fatores.csv       CENÁRIOS EM %: ajuste P5..P95 sobre a previsão (ajuste_pXX_pct) por métrica,
                                subsistema e h, nas rodadas a ±--janela dias da data de referência (todos os anos)
     cenarios_trajetorias.csv   semanas reais de erro (D+1..D+7, todos os subsistemas) dessa época do ano
-    cenarios_semana_escolhidos.csv   semanas P5/P10/P50/P90/P95 pelo erro médio semanal do SIN
+    cenarios_semana.csv        cenários semanais: média das semanas reais de cada faixa (estresse alto <P5, alto P5-P15,
+                               central P40-P60, baixo P85-P95, estresse baixo >P95); membros em _membros.csv
     cenarios_aplicados_quantis.csv / _semana.csv / cenarios_<rodada>.png   cenários aplicados à rodada mais recente
     calibracao_*.csv           CALIBRAÇÃO dos cenários fora da amostra (cada ano testado com cenários dos anos anteriores):
                                % de dias dentro de P10-P90 (esperado 80) e P5-P95 (90), acima do alto, abaixo do baixo
@@ -848,9 +849,17 @@ def trajetorias(longo, ref, janela, mesmo_dia_semana=False):
     return tab, nota
 
 
-def escolher_trajetorias(nota):
-    """Rodada histórica cuja semana fica no quantil q do erro médio semanal (erro baixo = carga alta)."""
-    return {q: nota.index[int(round(q * (len(nota) - 1)))] for q in QUANTIS_CEN}
+# cenários semanais = MÉDIA das semanas reais numa faixa de posição (erro médio semanal baixo = carga alta).
+# Uma semana isolada é uma amostra só (o caminho dia a dia dela é ruído); a média do grupo mantém a coerência
+# da semana (todas foram altas, ou baixas) e cancela as idiossincrasias de cada uma.
+GRUPOS_SEMANA = [("estresse alto", 0.00, 0.05), ("alto", 0.05, 0.15), ("central", 0.40, 0.60),
+                 ("baixo", 0.85, 0.95), ("estresse baixo", 0.95, 1.00)]
+
+
+def grupos_semana(nota):
+    """{cenário: [rodadas]} pela posição (0 a 1) do erro médio semanal entre as semanas da janela."""
+    pos = (nota.rank(method="first") - 0.5) / len(nota)
+    return {nome: list(pos[(pos >= lo) & ((pos < hi) | (hi >= 1))].index) for nome, lo, hi in GRUPOS_SEMANA}
 
 
 def ultima_rodada(prev):
@@ -922,21 +931,31 @@ def cenarios(longo, saida, ref=None, janela=15, mesmo_dia_semana=False, ult=None
     traj["ajuste_pct"] = _ajuste(traj.erro_pct)
     traj["nota_semana_pct"] = traj.rodada.map(nota)
     _salvar(traj, "cenarios_trajetorias.csv", saida)
-    esc = escolher_trajetorias(nota)
-    t_esc = pd.concat([traj[traj.rodada == r].assign(cenario=NOMES_CEN[q], quantil=q) for q, r in esc.items()])
-    _salvar(t_esc, "cenarios_semana_escolhidos.csv", saida)
+    grupos = grupos_semana(nota)
+    membros = pd.DataFrame([{"cenario": g, "rodada": r, "nota_semana_pct": nota[r]} for g, rs in grupos.items() for r in rs])
+    _salvar(membros, "cenarios_semana_membros.csv", saida)
+    t_esc = pd.concat([traj[traj.rodada.isin(rs)].groupby(["metrica", "subsistema", "h"]).ajuste_pct.mean().reset_index()
+                       .assign(cenario=g, n_semanas=len(rs)) for g, rs in grupos.items() if rs], ignore_index=True)
+    _salvar(t_esc, "cenarios_semana.csv", saida)
 
-    print("\nSIN - semana inteira por cenário (semanas históricas reais; % sobre a previsão)")
-    print(f"{'cenário':<22}{'semana usada':>14}" + "".join(f"{'D+'+str(h):>7}" for h in HORIZONTES) +
+    print("\nSIN - semana inteira por cenário (média das semanas reais de cada faixa; % sobre a previsão)")
+    print(f"{'cenário':<16}{'faixa':>11}{'semanas':>9}" + "".join(f"{'D+'+str(h):>7}" for h in HORIZONTES) +
           f"{'média sem.':>12}{'ponta sem.':>12}")
     sin = t_esc[t_esc.subsistema == "SIN"]
-    for q, r in esc.items():
-        zm = sin[(sin.quantil == q) & (sin.metrica == "media")].sort_values("h")
-        zp = sin[(sin.quantil == q) & (sin.metrica == "ponta")].sort_values("h")
-        print(f"{NOMES_CEN[q]:<22}{r:%d/%m/%Y}".ljust(36) + "".join(f"{v:>+7.1f}" for v in zm.ajuste_pct) +
+    for g, lo, hi in GRUPOS_SEMANA:
+        zm = sin[(sin.cenario == g) & (sin.metrica == "media")].sort_values("h")
+        zp = sin[(sin.cenario == g) & (sin.metrica == "ponta")].sort_values("h")
+        if zm.empty:
+            continue
+        faixa = f"P{100 * lo:.0f}-P{100 * hi:.0f}"
+        print(f"{g:<16}{faixa:>11}{len(grupos[g]):>9}" + "".join(f"{v:>+7.1f}" for v in zm.ajuste_pct) +
               f"{zm.ajuste_pct.mean():>+12.1f}{zp.ajuste_pct.mean():>+12.1f}")
-    print("Dia a dia (quantis) serve para um dia isolado. Para a semana, use as semanas históricas: aplicar o P10"
-          " em todos os dias exagera (dias seguidos raramente ficam todos no extremo).")
+    pouco = [g for g, rs in grupos.items() if len(rs) < 4]
+    if pouco:
+        print(f"  AVISO: {pouco} com menos de 4 semanas -> cenário ainda ruidoso; aumentar --janela")
+    print("Dia a dia (quantis) serve para um dia isolado. Para a semana, use os cenários semanais: aplicar o P10"
+          " em todos os dias exagera (dias seguidos raramente ficam todos no extremo). As semanas de cada"
+          " faixa estão em cenarios_semana_membros.csv.")
 
     if ult is not None and len(ult):
         # cenários aplicados à rodada mais recente (CSV, para quem quiser em MW)
@@ -945,28 +964,24 @@ def cenarios(longo, saida, ref=None, janela=15, mesmo_dia_semana=False, ult=None
             c = f"p{int(round(100 * q)):02d}"
             ap_q[f"carga_{c}_mw"] = ap_q.prev_mw * (1 + ap_q[f"ajuste_{c}_pct"] / 100)
         _salvar(ap_q, "cenarios_aplicados_quantis.csv", saida)
-        partes = []
-        for q, r in esc.items():
-            x = ult.merge(tab.loc[r].stack().rename("erro_pct").reset_index(), on=["metrica", "subsistema", "h"], how="left")
-            x["ajuste_pct"] = _ajuste(x.erro_pct)
-            x["carga_mw"] = x.prev_mw * (1 + x.ajuste_pct / 100)
-            partes.append(x.assign(cenario=NOMES_CEN[q], quantil=q, rodada_historica=r))
-        _salvar(pd.concat(partes, ignore_index=True), "cenarios_aplicados_semana.csv", saida)
+        ap_s = ult.merge(t_esc, on=["metrica", "subsistema", "h"], how="left")
+        ap_s["carga_mw"] = ap_s.prev_mw * (1 + ap_s.ajuste_pct / 100)
+        _salvar(ap_s, "cenarios_aplicados_semana.csv", saida)
     grafico_cenarios(fat, t_esc, saida, ref, rotulo)
 
 
 def grafico_cenarios(fat, t_esc, saida, ref, rotulo, sub="SIN"):
     fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), sharey=True)
     cor = "#2a78d6"
-    estilo = {0.10: ("#eb6834", "-"), 0.50: ("#52514e", "--"), 0.90: ("#1baf7a", "-")}
+    estilo = {"alto": ("#eb6834", "-"), "central": ("#52514e", "--"), "baixo": ("#1baf7a", "-")}
     for ax, m in zip(axs, ["media", "ponta"]):
         t = fat[(fat.metrica == m) & (fat.subsistema == sub)].sort_values("h")
         ax.fill_between(t.h, t.ajuste_p05_pct, t.ajuste_p95_pct, color=cor, alpha=0.13, lw=0, label="P5-P95 (dia a dia)")
         ax.fill_between(t.h, t.ajuste_p10_pct, t.ajuste_p90_pct, color=cor, alpha=0.25, lw=0, label="P10-P90 (dia a dia)")
         ax.plot(t.h, t.ajuste_p50_pct, color=cor, lw=2, marker="o", ms=4, label="P50 (dia a dia)")
         for q, (c, ls) in estilo.items():
-            z = t_esc[(t_esc.metrica == m) & (t_esc.subsistema == sub) & (t_esc.quantil == q)].sort_values("h")
-            ax.plot(z.h, z.ajuste_pct, color=c, lw=1.5, ls=ls, label=f"semana {NOMES_CEN[q]}")
+            z = t_esc[(t_esc.metrica == m) & (t_esc.subsistema == sub) & (t_esc.cenario == q)].sort_values("h")
+            ax.plot(z.h, z.ajuste_pct, color=c, lw=1.5, ls=ls, label=f"semana: {q}")
         ax.axhline(0, color="#52514e", lw=0.8)
         ax.set_title(f"{sub}  -  {'média' if m == 'media' else 'ponta'} diária", fontsize=10, loc="left")
         ax.set_xticks(list(HORIZONTES), [f"D+{h}" for h in HORIZONTES], fontsize=8)
