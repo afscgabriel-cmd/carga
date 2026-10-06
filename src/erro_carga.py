@@ -1308,8 +1308,8 @@ def main():
     ap.add_argument("--data-ref", default=None, help="data de referência dos cenários (padrão: rodada mais recente)")
     ap.add_argument("--dias-recentes", type=int, default=JANELA_RECENTE,
                     help="janela do nível recente (padrão 365; menor acompanha mais rápido, com mais ruído)")
-    ap.add_argument("--nivel-recente", action="store_true",
-                    help=f"cenários com o nível de erro dos últimos {JANELA_RECENTE} dias (sazonalidade de todos os anos)")
+    ap.add_argument("--sem-nivel-recente", dest="nivel_recente", action="store_false",
+                    help="cenários sem o ajuste de nível recente (padrão: com; escolhido pela calibração fora da amostra)")
     ap.add_argument("--janela", type=int, default=JANELA_EPOCA,
                     help="cenários: ± dias em torno da data (todos os anos) para o centro e a largura da época")
     ap.add_argument("--so-relatorio", action="store_true",

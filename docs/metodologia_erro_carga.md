@@ -132,7 +132,7 @@ parte é estimada com a quantidade de dado que exige:
 Cenário de um dia: `r_p(h) = centro_época(h) + largura_época(h) x z_p`. O cenário da semana dá o ajuste da energia
 da semana (W) e o caminho dia a dia coerente com ele, para cada subsistema.
 
-**Nível recente (`--nivel-recente`).** A calibração mostrou faixas largas demais, porque o erro do modelo vem
+**Nível recente (padrão; `--sem-nivel-recente` desliga).** A calibração mostrou faixas largas demais, porque o erro do modelo vem
 diminuindo. Para corrigir sem perder a sazonalidade, a largura e o centro são separados em duas partes:
 
 `largura(época, h) = perfil sazonal(época, h) x nível atual(h)`
@@ -173,3 +173,12 @@ de poucos MW contavam como "abaixo" ou "acima" quando o quantil caía em 0.
 Os cenários semanais são testados da mesma forma (W contra P10-P90 de W). Saídas: `calibracao_horizonte.csv`,
 `calibracao_ano.csv` e `calibracao_semanas.csv`. Com o histórico atual, os anos de teste são 2025 e 2026: o resultado
 é indicativo e fica mais firme a cada mês de dado novo.
+
+**Escolha do método (calibração de 06/10/2026, testes em 2025 e 2026).** Ficou como padrão o padronizado com nível
+recente:
+- menor pinball no SIN: 0,428, contra 0,432 do empírico e 0,434 do padronizado;
+- cobertura mais perto de 80 %: 86 % nos dias e 84 % nas semanas, contra 90 % e 91 % do padronizado.
+
+Ressalva da ponta: em 2026 o oficial ficou acima do cenário alto em 20 % dos dias, porque a ponta passou a ser mais
+subestimada. Para estresse da ponta, use o P95 como cenário alto.
+
