@@ -36,7 +36,7 @@ Saídas em output/erro_carga/<oficial>/, ao lado do script (CSV ; e decimal ,; v
     cenarios_dia.csv           CENÁRIOS EM % (método padronizado): P5..P95 de r = oficial/previsão - 1 por métrica,
                                subsistema e h, na época da data de referência (seção 8 da metodologia)
     cenarios_semana.csv        cenário da semana (energia) e caminho dia a dia, P5..P95
-    cenarios_aplicados_*.csv   cenários aplicados à rodada mais recente (MW)
+    cenarios_aplicados_*.csv   cenários aplicados à rodada mais recente (MW); cenarios_gw_<rodada>.png = gráfico em GW
     calibracao_*.csv           CALIBRAÇÃO fora da amostra: método padronizado x empírico (cobertura, caudas, pinball)
     piores_dias.csv            30 maiores erros por métrica e subsistema, com o erro de cada subsistema ao lado
                                (para achar dado ruim; dias a descartar vão em dias_excluidos.csv: dia;motivo)
@@ -1207,8 +1207,62 @@ def cenarios(longo, saida, ref=None, janela=JANELA_EPOCA, ult=None, recente=Fals
             aps = ult.merge(sem, on=["metrica", "subsistema", "h"], how="left")
             aps["carga_mw"] = aps.prev_mw * (1 + aps.r / 100)
             _salvar(aps, "cenarios_aplicados_semana.csv", saida)
+        imprimir_cenarios_gw(ap, tipos)
+        grafico_cenarios_gw(ap, tipos, saida)
     grafico_cenarios(dia, sem, saida, ref, janela)
     return mod
+
+
+def imprimir_cenarios_gw(ap, tipos, sub="SIN"):
+    """Cenários aplicados à rodada mais recente, em GW (alto da ponta = P95, como recomendado)."""
+    r0 = ap.rodada.iloc[0]
+    print(f"\n{sub} em GW - cenários aplicados à rodada de {r0:%d/%m/%Y}  (alto: P90 na média, P95 na ponta)")
+    print(f"{'':>5}{'dia':>11}  {'MÉDIA:':>7}{'prev':>7}{'baixo':>7}{'central':>8}{'alto':>7}   {'PONTA:':>7}{'prev':>7}"
+          f"{'baixo':>7}{'central':>8}{'alto':>7}")
+    t = ap[ap.subsistema == sub].pivot_table(index=["h", "dia"], columns="metrica",
+                                             values=["prev_mw", "carga_p10_mw", "carga_p50_mw", "carga_p90_mw", "carga_p95_mw"])
+    for (h, d), z in t.iterrows():
+        marca = f"   ({tipos[h]})" if tipos.get(h) not in (None, *TIPOS_NORMAIS) else ""
+        print(f"{'D+'+str(h):>5}  {d:%a %d/%m}" + f"{'':>9}{z[('prev_mw', 'media')]/1000:>7.1f}"
+              f"{z[('carga_p10_mw', 'media')]/1000:>7.1f}{z[('carga_p50_mw', 'media')]/1000:>8.1f}"
+              f"{z[('carga_p90_mw', 'media')]/1000:>7.1f}{'':>10}{z[('prev_mw', 'ponta')]/1000:>7.1f}"
+              f"{z[('carga_p10_mw', 'ponta')]/1000:>7.1f}{z[('carga_p50_mw', 'ponta')]/1000:>8.1f}"
+              f"{z[('carga_p95_mw', 'ponta')]/1000:>7.1f}{marca}")
+
+
+def grafico_cenarios_gw(ap, tipos, saida, sub="SIN"):
+    """Previsão da rodada mais recente com as faixas de cenário, em GW: média e ponta do SIN."""
+    r0 = ap.rodada.iloc[0]
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.8))
+    cor = "#2a78d6"
+    for ax, m in zip(axs, ["media", "ponta"]):
+        t = ap[(ap.metrica == m) & (ap.subsistema == sub)].sort_values("dia")
+        gw = lambda c: t[c] / 1000
+        alto = "carga_p95_mw" if m == "ponta" else "carga_p90_mw"
+        ax.fill_between(t.dia, gw("carga_p05_mw"), gw("carga_p95_mw"), color=cor, alpha=0.12, lw=0, label="estresse (P5-P95)")
+        ax.fill_between(t.dia, gw("carga_p10_mw"), gw(alto), color=cor, alpha=0.25, lw=0,
+                        label=f"baixo a alto (P10-{'P95' if m == 'ponta' else 'P90'})")
+        ax.plot(t.dia, gw("carga_p50_mw"), color=cor, lw=2, label="central (P50)")
+        ax.plot(t.dia, gw("prev_mw"), color="#0b0b0b", lw=1.5, ls="--", marker="o", ms=3.5, label="previsão do modelo")
+        z = t.iloc[-1]                                   # rótulos só no último dia, à direita
+        for c, nome in [(alto, "alto"), ("carga_p50_mw", "central"), ("carga_p10_mw", "baixo")]:
+            ax.annotate(f"{nome} {z[c]/1000:.1f}", (z.dia, z[c] / 1000), textcoords="offset points", xytext=(8, 0),
+                        ha="left", va="center", fontsize=7.5, color="#0b0b0b")
+        ax.set_xlim(t.dia.min() - pd.Timedelta(hours=12), t.dia.max() + pd.Timedelta(hours=40))
+        y_min = ax.get_ylim()[0]
+        for h, d in t.set_index("h").dia.items():
+            if tipos.get(h) not in (None, *TIPOS_NORMAIS):
+                ax.axvspan(d - pd.Timedelta(hours=12), d + pd.Timedelta(hours=12), color="#b5b4ae", alpha=0.25, lw=0)
+                ax.text(d, y_min, tipos[h], ha="center", va="bottom", fontsize=7, color="#52514e")
+        ax.set_title(f"{sub}  -  {'média' if m == 'media' else 'ponta'} diária (GW)", fontsize=10, loc="left")
+        ax.set_xticks(t.dia, [f"{d:%a %d/%m}\nD+{h}" for d, h in zip(t.dia, t.h)], fontsize=7.5)
+        _estilo(ax)
+    axs[0].legend(fontsize=7, frameon=False, loc="upper left")
+    fig.suptitle(f"Cenários de carga para os próximos dias  -  rodada de {r0:%d/%m/%Y}  (área cinza = feriado: fora dos cenários)",
+                 fontsize=10, x=0.01, ha="left")
+    fig.tight_layout()
+    fig.savefig(saida / f"cenarios_gw_{r0:%Y%m%d}.png", dpi=130)
+    plt.close(fig)
 
 
 def grafico_cenarios(dia, sem, saida, ref, janela, sub="SIN"):
