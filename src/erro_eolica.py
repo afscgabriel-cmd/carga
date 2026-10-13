@@ -1088,6 +1088,7 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
                 print(f"{n:<27}{mt:<8}{z.dentro:>7.0f}%{z.acima:>6.0f}%{z.abaixo:>7.0f}%{z.pinball:>9.3f}{extra:>52}{pw:>10}")
         rr = x_.groupby("metodo").pinball.mean()
         print(f"-> menor pinball: {rr.idxmin()}   [por antecedência, ano e faixa em calibracao_*.csv]")
+        imprimir_calibracao_ano(x_, sub)
     if DETALHADO:
         for sub in SUBS_TERMINAL:
             t = cal_h[(cal_h.subsistema == sub) & (cal_h.metrica == "media")]
@@ -1100,6 +1101,30 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
             print(t[["metodo", "ano_teste", "treino", "metrica", "n", "dentro_P10_P90_pct", "acima_do_alto_pct",
                      "abaixo_do_baixo_pct", "pinball"]].round(2).to_string(index=False))
 
+
+
+GRUPOS_H = [("D+1", [1]), ("D+2..4", [2, 3, 4]), ("D+5..9", [5, 6, 7, 8, 9])]
+
+
+def imprimir_calibracao_ano(x_, sub, metodos=("padronizado", "padronizado+faixa", "padronizado+faixa+recente")):
+    """Calibração separada por ano de teste (média diária): as faixas estão largas ou estreitas para o modelo de hoje?
+    Largura = P90 - P10 em pontos percentuais de r (média dos dias)."""
+    x = x_[(x_.metrica == "media") & x_.metodo.isin(metodos)].copy()
+    if x.empty:
+        return
+    x["largura"] = x.p90 - x.p10
+    print(f"\n{sub} - POR ANO DE TESTE (média diária). Faixa larga demais: dentro > 85 % e acima/abaixo < 7 %; "
+          f"estreita demais: dentro < 75 %")
+    print(f"{'método':<27}{'ano':>5}{'dias':>7}{'dentro':>8}{'acima':>7}{'abaixo':>8}{'largura P10-P90':>17}"
+          + "".join(f"{'dentro ' + g:>15}" for g, _ in GRUPOS_H) + f"{'viés real':>11}{'centro P50':>12}")
+    for met in metodos:
+        for ano, g in x[x.metodo == met].groupby("ano_teste"):
+            grupos = "".join(f"{100 * g[g.h.isin(hs)].dentro_80.mean():>14.0f}%" for _, hs in GRUPOS_H)
+            print(f"{met:<27}{int(ano):>5}{g.dia.nunique():>7}{100 * g.dentro_80.mean():>7.0f}%{100 * g.acima_alto.mean():>6.0f}%"
+                  f"{100 * g.abaixo_baixo.mean():>7.0f}%{g.largura.mean():>15.1f} pp{grupos}"
+                  f"{g.r.median():>+10.1f}%{g.p50.median():>+11.1f}%")
+    print("  viés real = mediana do r observado no ano; centro P50 = mediana do cenário central usado. Se o centro ficar"
+          " acima do viés real, o cenário está alto demais naquele ano.")
 
 
 def testes_sensibilidade(longo, saida):
