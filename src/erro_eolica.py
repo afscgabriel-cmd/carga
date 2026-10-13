@@ -63,6 +63,8 @@ HORIZONTES = list(range(1, 10))          # D+1 a D+9
 HORAS_PONTA = [18, 19, 20]               # ponta = média das horas que começam às 18, 19 e 20 h
 SUBS = ["SE", "S", "NE", "N", "SIN"]
 SUBS_TERMINAL = ["SIN", "NE"]
+SUBS_SIN = ["NE", "S", "N"]              # SIN = NE + S + N. O SE (~30 MW, ~0,2 % do total) fica fora: falta no deck
+                                         # ou na previsão em parte do histórico e derrubava o pareamento do SIN
 NOMES_SUB = {"SUDESTE": "SE", "SE/CO": "SE", "SECO": "SE", "SUL": "S", "NORDESTE": "NE", "NORTE": "N"}
 JANELA_FAIXA = 30                        # faixa de vento: previsão contra a média do deck nos 30 dias antes da rodada
 FAIXAS = ["fraco", "normal", "forte"]    # tercis da razão previsão / média recente, por subsistema
@@ -143,10 +145,11 @@ def _horario(d, nome):
 
 
 def _com_sin(d, chaves):
-    """Acrescenta SIN = soma dos 4 subsistemas (só onde os 4 existem)."""
+    """Acrescenta SIN = soma de SUBS_SIN (só onde todos existem)."""
     d = d[d.subsistema.isin(SUBS[:4])]
-    s = d.groupby(chaves).mw.agg(["sum", "size"])
-    s = s[s["size"] == 4].reset_index().rename(columns={"sum": "mw"}).drop(columns="size")
+    x = d[d.subsistema.isin(SUBS_SIN)]
+    s = x.groupby(chaves).mw.agg(["sum", "size"])
+    s = s[s["size"] == len(SUBS_SIN)].reset_index().rename(columns={"sum": "mw"}).drop(columns="size")
     s["subsistema"] = "SIN"
     return pd.concat([d, s], ignore_index=True)
 
@@ -357,6 +360,10 @@ def cobertura(prev, ofi, diario, saida):
             diario.dia.dt.to_period("M")).dia.nunique()}).fillna(0).astype(int)
     c.index.name = "mes"
     _salvar(c.reset_index().astype({"mes": str}), "cobertura.csv", saida)
+    sub = diario[diario.h == 1].groupby("subsistema").dia.agg(["min", "max", "nunique"])
+    print("pares D+1 por subsistema: " + "; ".join(f"{s} {r['min']:%m/%Y} a {r['max']:%m/%Y} ({r['nunique']:,} dias)"
+                                                    for s, r in sub.reindex([x for x in SUBS if x in sub.index]).iterrows())
+          + f"  (SIN = {' + '.join(SUBS_SIN)})", flush=True)
     t = c.dias_pareados_d1
     t = t[t.index >= t[t > 0].index.min()]
     falhas = t.iloc[1:-1][t.iloc[1:-1] < 20]
