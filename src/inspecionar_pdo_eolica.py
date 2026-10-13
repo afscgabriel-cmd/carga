@@ -65,20 +65,20 @@ def sql(eng, q, timeout="900s", **params):
 
 # ------------------------------------------------------------------ leitura
 def ler_pdo(eng, ini, fim):
-    """Um dia de rodada por consulta (a tabela tem ~140 milhões de linhas)."""
-    partes = []
-    for d in pd.date_range(ini, fim):
-        partes.append(sql(eng, f"""
-            SELECT rodada_dia, valido_para, BTRIM(submerc) AS subsistema,
-                   BTRIM(SPLIT_PART(nome, '_', 2)) AS tipo, rev,
-                   SUM(geracao) AS geracao, SUM(geracao_operada) AS operada,
-                   COUNT(*) AS n_linhas, COUNT(DISTINCT BTRIM(nome)) AS n_usinas,
-                   MAX(potencia) AS pot_max, MAX(fatcap) AS fatcap_max
-            FROM {T_PDO}
-            WHERE rodada_dia = :d
-            GROUP BY rodada_dia, valido_para, BTRIM(submerc), BTRIM(SPLIT_PART(nome, '_', 2)), rev""", d=d.date()))
-        log(f"  PDO rodada {d.date()}: {len(partes[-1]):,} linhas agregadas")
-    p = pd.concat(partes, ignore_index=True)
+    """Uma consulta só para o período: a tabela (~140 milhões de linhas) não tem índice útil em rodada_dia, então
+    cada consulta varre a tabela inteira (~60 s); consultar dia a dia multiplica esse tempo."""
+    p = sql(eng, f"""
+        SELECT rodada_dia, valido_para, BTRIM(submerc) AS subsistema,
+               BTRIM(SPLIT_PART(nome, '_', 2)) AS tipo, rev,
+               SUM(geracao) AS geracao, SUM(geracao_operada) AS operada,
+               COUNT(*) AS n_linhas, COUNT(DISTINCT BTRIM(nome)) AS n_usinas,
+               MAX(potencia) AS pot_max, MAX(fatcap) AS fatcap_max
+        FROM {T_PDO}
+        WHERE rodada_dia >= :a AND rodada_dia <= :b
+        GROUP BY rodada_dia, valido_para, BTRIM(submerc), BTRIM(SPLIT_PART(nome, '_', 2)), rev""",
+            timeout="1800s", a=ini.date(), b=fim.date())
+    log(f"  PDO: {len(p):,} linhas agregadas, rodadas {p.rodada_dia.nunique()}")
+    p = p.copy()
     p["rodada_dia"] = pd.to_datetime(p.rodada_dia); p["valido_para"] = pd.to_datetime(p.valido_para)
     for c in ("geracao", "operada"):
         p[c] = pd.to_numeric(p[c], errors="coerce")
@@ -209,7 +209,7 @@ def main():
     a = ap.parse_args()
     ini, fim = pd.Timestamp(a.ini), pd.Timestamp(a.fim)
     eng = engine_banco()
-    log(f"lendo PDO de {ini.date()} a {fim.date()} (uma consulta por dia)...")
+    log(f"lendo PDO de {ini.date()} a {fim.date()} (uma consulta só; 1 a 3 min)...")
     p = ler_pdo(eng, ini, fim)
     uee = ler_uee(eng, ini, fim)
     real = ler_real(eng, ini, fim + pd.Timedelta(days=1))
