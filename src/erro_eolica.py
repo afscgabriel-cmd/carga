@@ -20,8 +20,16 @@ prevista (fraco / normal / forte, pela previsão do dia contra a média do deck 
 mais o IC 95 % do viés por bootstrap em blocos semanais. As tabelas por ano e por faixa testam se o erro em %
 é estável (unidade dos cenários): se for, os cenários seguem o método da carga.
 
+Cenários (Fase 3, método padronizado da carga + faixa de vento): centro e largura da época (±30 dias, todos os anos),
+formato das caudas por faixa de vento (histórico todo), nível recente (365 dias), período D+1..D+9 pelo caminho
+condicional. Aplicados à rodada mais recente: tabela e gráfico em GW (SIN e NE).
+Calibração (Fase 4): cada ano testado com o modelo estimado só com os anos anteriores; compara empírico, padronizado,
++faixa, +recente e +faixa+recente (cobertura P10-P90, caudas, pinball, cobertura por faixa).
+
 Uso:
     python erro_eolica.py                       # banco, desde INICIO (terminal enxuto: SIN e NE)
+    python erro_eolica.py --sem-faixa           # cenários sem a faixa de vento (idem --sem-nivel-recente)
+    python erro_eolica.py --sem-calibracao      # mais rápido
     python erro_eolica.py --detalhado           # terminal completo (todos os subsistemas, mês x antecedência)
     python erro_eolica.py --ini 2024-01-01
     python erro_eolica.py --so-relatorio        # sem banco: refaz o relatório a partir do erro_diario.csv
@@ -38,7 +46,11 @@ Saídas em output/erro_eolica/ (CSV com ; e decimal ,):
     perfil_hora.csv          subsistema x h x hora
     cobertura.csv            rodadas da previsão, dias do deck e dias pareados por mês
     piores_dias.csv          maiores |r| por métrica e subsistema, com r de cada subsistema ao lado
-    *.png                    horizonte.png, mes_horizonte.png, estabilidade.png
+    cenarios_dia.csv         quantis P5..P95 de r na época da rodada (por métrica, subsistema, h e faixa)
+    cenarios_periodo.csv     período D+1..D+9: r médio do período e caminho dia a dia
+    cenarios_aplicados_*.csv cenários aplicados à rodada mais recente, em MW
+    calibracao_*.csv         calibração por antecedência, ano e faixa
+    *.png                    horizonte, mes_horizonte, estabilidade, cenarios_gw_<SIN|NE>_<rodada>
 """
 import argparse
 import json
@@ -80,6 +92,7 @@ OFICIAL = dict(tabela="fac_ons_renovaveis", rodada="rodada_dia", tempo="valido_p
 CORES = {"SE": "#2a78d6", "S": "#eb6834", "NE": "#1baf7a", "N": "#eda100", "SIN": "#52514e"}
 DIVERGENTE = LinearSegmentedColormap.from_list("div", ["#1c5cab", "#86b6ef", "#f0efec", "#f0a09f", "#b8302f"])
 SEQUENCIAL = LinearSegmentedColormap.from_list("seq", ["#f7f9fc", "#86b6ef", "#1c5cab"])
+SEMANA = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 MESES = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 
 DETALHADO = False
@@ -248,17 +261,32 @@ def erro_diario(pares, ofi):
     return _calendario(_faixa(d, ofi))
 
 
+def _ref_recente(ofi):
+    """Média diária do deck nos JANELA_FAIXA dias ANTES de cada data (por subsistema): o 'vento normal recente'."""
+    od = ofi.assign(dia=ofi.valido_para.dt.normalize()).groupby(["subsistema", "dia"]).mw.mean()
+    ref = od.groupby(level=0).apply(lambda s: s.droplevel(0).asfreq("D").rolling(JANELA_FAIXA, min_periods=JANELA_FAIXA // 2)
+                                    .mean().shift(1))
+    return ref.rename("ref_recente").reset_index().rename(columns={"dia": "rodada"})
+
+
+def cortes_faixa(d):
+    """Limites fixos da faixa (tercis do histórico da razão previsão / média recente), por subsistema."""
+    return d.dropna(subset=["razao_recente"]).groupby("subsistema").razao_recente.quantile([1 / 3, 2 / 3]).unstack()
+
+
+def classificar_faixa(d, cortes):
+    c = cortes.reindex(d.subsistema.values)
+    f = np.where(d.razao_recente.values <= c[1 / 3].values, "fraco",
+                 np.where(d.razao_recente.values <= c[2 / 3].values, "normal", "forte"))
+    return pd.Series(np.where(d.razao_recente.isna().values | np.isnan(c[1 / 3].values), "sem ref", f), index=d.index)
+
+
 def _faixa(d, ofi):
     """Faixa de vento prevista: previsão média do dia / média do deck nos JANELA_FAIXA dias antes da rodada.
-    Tercis por subsistema -> fraco, normal, forte (tudo conhecido na hora da rodada)."""
-    od = ofi.assign(dia=ofi.valido_para.dt.normalize()).groupby(["subsistema", "dia"]).mw.mean()
-    ref = (od.groupby(level=0).apply(lambda s: s.droplevel(0).asfreq("D").rolling(JANELA_FAIXA, min_periods=JANELA_FAIXA // 2)
-                                     .mean().shift(1)).rename("ref_recente").reset_index())
-    d = d.merge(ref.rename(columns={"dia": "rodada"}), on=["subsistema", "rodada"], how="left")
+    Tercis do histórico por subsistema -> fraco, normal, forte (tudo conhecido na hora da rodada)."""
+    d = d.merge(_ref_recente(ofi), on=["subsistema", "rodada"], how="left")
     d["razao_recente"] = d.prev_media / d.ref_recente
-    q = d.groupby("subsistema").razao_recente.transform(lambda s: s.rank(pct=True))
-    d["faixa"] = pd.cut(q, [0, 1 / 3, 2 / 3, 1], labels=FAIXAS, include_lowest=True).astype(str)
-    d.loc[d.razao_recente.isna(), "faixa"] = "sem ref"
+    d["faixa"] = classificar_faixa(d, cortes_faixa(d))
     return d
 
 
@@ -271,7 +299,7 @@ def _calendario(d):
 
 def longo_diario(d):
     """Uma linha por rodada x dia x subsistema x métrica: erro em MW (deck - previsão) e r em %."""
-    base = ["rodada", "dia", "subsistema", "h", "mes", "ano", "semana", "faixa"]
+    base = ["rodada", "dia", "subsistema", "h", "mes", "ano", "semana", "faixa", "razao_recente"]
     partes = []
     for m in ["media", "ponta"]:
         x = d[base].copy()
@@ -595,8 +623,475 @@ def relatorio(longo, saida, perfil=None):
     return res_h
 
 
+# ------------------------------------------------------------------ cenários (método padronizado, como na carga)
+# r = 100 x (deck / previsão - 1); geração do cenário = previsão x (1 + r/100). Positivo = deck acima da previsão.
+# P90/P95 = cenários altos, P10/P5 = baixos.
+#   centro e largura da época   mediana e IQR/1,349 de r nas rodadas a ±JANELA_EPOCA dias da data (todos os anos);
+#                               D+2..D+9 suavizados em h (centro linear, largura a + b·h); D+1 fica como observado
+#   formato das caudas          quantis de z = (r - centro)/largura, todo o histórico, por faixa de vento
+#                               (fraco / normal / forte) e por grupo (D+1 | D+2..D+9)
+#   nível recente               deslocamento e escala de z nos últimos JANELA_RECENTE dias (todas as épocas)
+#   período                     W = r médio de D+1..D+9 (SIN, média diária) e caminho r_h = centro_h + beta_h (W - centro_W)
+QS = [0.05, 0.10, 0.50, 0.90, 0.95]
+PCOLS = [f"p{int(round(100 * q)):02d}" for q in QS]
+ZCOLS = [f"z{c[1:]}" for c in PCOLS]
+ROT_Q = {0.95: "estresse alto", 0.90: "alto", 0.50: "central", 0.10: "baixo", 0.05: "estresse baixo"}
+JANELA_EPOCA = 30
+JANELA_RECENTE = 365
+MIN_RECENTE = 60
+PASSO_CENTRO = 7
+CENTROS = [int(c) for c in np.arange(1, 366, PASSO_CENTRO) + PASSO_CENTRO // 2]    # int puro (Windows: int32 x int64)
+CHAVE = ["metrica", "subsistema", "h"]
+
+
+def _na_janela(datas, ref, janela):
+    d = (datas.dt.dayofyear - ref.dayofyear).abs()
+    return np.minimum(d, 365 - d) <= janela
+
+
+def _centro_doy(datas, passo=PASSO_CENTRO):
+    return (((datas.dt.dayofyear - 1) // passo) * passo + 1 + passo // 2).astype("int64")
+
+
+def _data_centro(c):
+    return pd.Timestamp(2001, 1, 1) + pd.Timedelta(days=int(c) - 1)
+
+
+def _mais_proximo(c, disponiveis):
+    disp = np.asarray(sorted(set(int(v) for v in disponiveis)))
+    d = np.abs(disp - c)
+    return int(disp[np.argmin(np.minimum(d, 365 - d))])
+
+
+def _escala(v):
+    q25, q75 = np.nanpercentile(v, [25, 75])
+    return (q75 - q25) / 1.349
+
+
+def _grupo(h):
+    return np.where(np.asarray(h) == 1, "D+1", "D+2..")
+
+
+def base_cenarios(longo):
+    x = longo.copy()
+    x["h"] = x.h.astype("int64")
+    x["centro"] = _centro_doy(x.rodada)
+    x["grupo"] = _grupo(x.h)
+    return x
+
+
+def _suavizar(e):
+    partes = []
+    for _, g in e.groupby(["centro", "metrica", "subsistema"]):
+        g = g.sort_values("h").copy()
+        g["mu"], g["sigma"] = g.mu_bruto, g.sigma_bruto
+        m = (g.h >= 2) & g.sigma_bruto.notna()
+        if m.sum() >= 3:
+            h = g.h[m].to_numpy(float)
+            cm = np.linalg.lstsq(np.c_[np.ones_like(h), h], g.mu_bruto[m].to_numpy(), rcond=None)[0]
+            cs = np.linalg.lstsq(np.c_[np.ones_like(h), h], g.sigma_bruto[m].to_numpy(), rcond=None)[0]
+            if cs[1] < 0:                              # a largura tem de crescer com h
+                cs = [g.sigma_bruto[m].mean(), 0.0]
+            g.loc[m, "mu"] = cm[0] + cm[1] * h
+            g.loc[m, "sigma"] = np.maximum(cs[0] + cs[1] * h, 1e-3)
+        g["sigma"] = g.sigma.clip(lower=1e-3)
+        partes.append(g)
+    return pd.concat(partes, ignore_index=True)
+
+
+def tabela_epoca(x, janela=JANELA_EPOCA):
+    partes = []
+    for c in CENTROS:
+        t = x[_na_janela(x.rodada, _data_centro(c), janela)]
+        if t.empty:
+            continue
+        g = t.groupby(CHAVE).r
+        q = g.quantile([0.25, 0.50, 0.75]).unstack()
+        partes.append(pd.DataFrame({"mu_bruto": q[0.50], "sigma_bruto": (q[0.75] - q[0.25]) / 1.349,
+                                    "n": g.size()}).reset_index().assign(centro=int(c)))
+    ep = _suavizar(pd.concat(partes, ignore_index=True))
+    return ep.astype({"centro": "int64", "h": "int64"})
+
+
+def _nivel(df, col, chaves, recente_desde):
+    linhas = []
+    for k, g in df.groupby(chaves):
+        rec = g[g.dia > recente_desde][col]
+        ok = len(rec) >= MIN_RECENTE
+        linhas.append(dict(zip(chaves, k), m_hist=g[col].median(), s_hist=_escala(g[col]),
+                           m_rec=rec.median() if ok else np.nan, s_rec=_escala(rec) if ok else np.nan, n_rec=len(rec)))
+    t = pd.DataFrame(linhas)
+    t["m_rec"] = t.m_rec.fillna(t.m_hist)
+    t["s_rec"] = t.s_rec.fillna(t.s_hist)
+    return t
+
+
+def forma_caudas(x, ep, faixa=True):
+    """Quantis de z por métrica x subsistema x grupo (D+1 | D+2..), por faixa de vento e 'todas'."""
+    y = x.merge(ep[["centro"] + CHAVE + ["mu", "sigma"]], on=["centro"] + CHAVE)
+    y["z"] = (y.r - y.mu) / y.sigma
+    partes = []
+    for fx, yy in [("todas", y)] + ([(f, y[y.faixa == f]) for f in FAIXAS] if faixa else []):
+        g = yy.groupby(["metrica", "subsistema", "grupo"]).z
+        f = g.quantile(QS).unstack()
+        f.columns = ZCOLS
+        f["n_forma"] = g.size()
+        partes.append(f.reset_index().assign(faixa=fx))
+    forma = pd.concat(partes, ignore_index=True)
+    forma = forma[forma.n_forma >= 30]
+    nivel = _nivel(y, "z", CHAVE, y.dia.max() - pd.Timedelta(days=JANELA_RECENTE))
+    return forma, nivel
+
+
+def semanas(x):
+    """W por rodada = r médio de D+1..D+9 (SIN, média diária), só períodos completos."""
+    s = x[(x.metrica == "media") & (x.subsistema == "SIN")].pivot_table(index="rodada", columns="h", values="r")
+    s = s.reindex(columns=HORIZONTES).dropna()
+    w = s.mean(axis=1).rename("W").reset_index()
+    w["centro"] = _centro_doy(w.rodada)
+    return w
+
+
+def modelo_semana(x, ep, janela=JANELA_EPOCA):
+    w = semanas(x)
+    partes = []
+    for c in CENTROS:
+        t = w[_na_janela(w.rodada, _data_centro(c), janela)]
+        if len(t) >= 10:
+            q25, q50, q75 = np.percentile(t.W, [25, 50, 75])
+            partes.append({"centro": int(c), "muW": q50, "sigmaW": max((q75 - q25) / 1.349, 1e-3), "nW": len(t)})
+    ew = pd.DataFrame(partes)
+    if ew.empty:
+        return ew, None, None, 0, None
+    w = w.merge(ew, on="centro")
+    w["z"] = (w.W - w.muW) / w.sigmaW
+    zW = np.quantile(w.z, QS)
+    rec = w[w.rodada > w.rodada.max() - pd.Timedelta(days=JANELA_RECENTE)].z
+    ok = len(rec) >= MIN_RECENTE
+    nivelW = {"m_hist": w.z.median(), "s_hist": _escala(w.z),
+              "m_rec": rec.median() if ok else w.z.median(), "s_rec": _escala(rec) if ok else _escala(w.z)}
+    y = (x[x.rodada.isin(w.rodada)].merge(ep[["centro"] + CHAVE + ["mu"]], on=["centro"] + CHAVE)
+         .merge(w[["rodada", "W", "muW"]], on="rodada"))
+    y["d"], y["dW"] = y.r - y.mu, y.W - y.muW
+    beta = y.groupby(CHAVE).apply(lambda g: (g.d * g.dW).sum() / (g.dW ** 2).sum(),
+                                  include_groups=False).rename("beta").reset_index()
+    return ew, zW, beta, len(w), nivelW
+
+
+def ajustar_modelo(x, janela=JANELA_EPOCA, recente=True, faixa=True, semana=True):
+    ep = tabela_epoca(x, janela)
+    forma, nivel = forma_caudas(x, ep, faixa)
+    ew, zW, beta, n_sem, nivelW = modelo_semana(x, ep, janela) if semana else (None, None, None, 0, None)
+    if not recente:
+        nivel = nivel.assign(m_rec=nivel.m_hist, s_rec=nivel.s_hist)
+        if nivelW:
+            nivelW = dict(nivelW, m_rec=nivelW["m_hist"], s_rec=nivelW["s_hist"])
+    nivel["k"] = nivel.s_rec / nivel.s_hist
+    return {"epoca": ep, "forma": forma, "nivel": nivel, "semana": ew, "zW": zW, "beta": beta, "nivelW": nivelW,
+            "n_semanas": n_sem, "recente": recente, "faixa": faixa}
+
+
+def quantis_dia(mod):
+    """Quantis de r (%) por centro de época x métrica x subsistema x h x faixa ('todas' = sem faixa)."""
+    ep = mod["epoca"].assign(grupo=lambda e: _grupo(e.h))
+    t = (ep.merge(mod["forma"], on=["metrica", "subsistema", "grupo"])
+         .merge(mod["nivel"][CHAVE + ["m_hist", "m_rec", "k"]], on=CHAVE, how="left"))
+    for p, z in zip(PCOLS, ZCOLS):          # nível recente: z' = m_rec + k (z - m_hist)  (neutro se desligado)
+        t[p] = t.mu + t.sigma * (t.m_rec + t.k * (t[z] - t.m_hist))
+    return t[["centro"] + CHAVE + ["faixa", "n", "mu", "sigma"] + PCOLS].astype({"centro": "int64", "h": "int64"})
+
+
+def aplicar_quantis(rows, Q):
+    """Junta a cada linha (centro, métrica, subsistema, h, faixa) os quantis do modelo; sem a faixa -> 'todas'."""
+    rows = rows.copy()
+    tem = set(Q.faixa.unique())
+    rows["faixa_q"] = np.where(rows.faixa.isin(tem), rows.faixa, "todas")
+    return rows.astype({"centro": "int64", "h": "int64"}).merge(
+        Q.rename(columns={"faixa": "faixa_q"}).drop(columns=["n", "mu", "sigma"]), on=["centro"] + CHAVE + ["faixa_q"])
+
+
+def cenarios_semana(mod, c):
+    ew = mod["semana"]
+    if ew is None or ew.empty:
+        return pd.DataFrame()
+    z = ew[ew.centro == _mais_proximo(c, ew.centro)].iloc[0]
+    nw = mod["nivelW"]
+    kW = nw["s_rec"] / nw["s_hist"]
+    muW = z.muW + z.sigmaW * (nw["m_rec"] - nw["m_hist"])
+    ep = mod["epoca"][mod["epoca"].centro == _mais_proximo(c, mod["epoca"].centro)][CHAVE + ["mu", "sigma"]]
+    t = ep.merge(mod["beta"], on=CHAVE).merge(mod["nivel"][CHAVE + ["m_rec", "m_hist"]], on=CHAVE, how="left")
+    t["mu_aj"] = t.mu + t.sigma * (t.m_rec - t.m_hist)
+    partes = []
+    for q, zq in zip(QS, mod["zW"]):
+        Wq = z.muW + z.sigmaW * (nw["m_rec"] + kW * (zq - nw["m_hist"]))
+        partes.append(t.assign(cenario=ROT_Q[q], quantil=q, W=Wq, r=t.mu_aj + t.beta * (Wq - muW)))
+    return pd.concat(partes, ignore_index=True)
+
+
+def ultima_rodada(prev, ofi):
+    """Média e ponta diárias da rodada mais recente da previsão (D+1..D+9) e a razão para a faixa de vento."""
+    r = prev.rodada.max()
+    p = prev[prev.rodada == r].copy()
+    p["dia"] = p.valido_para.dt.normalize()
+    p["h"] = (p.dia - r).dt.days.astype("int64")
+    p["hora"] = p.valido_para.dt.hour
+    p = p[p.h.isin(HORIZONTES)]
+    g = p.groupby(["dia", "h", "subsistema"]).mw
+    d = pd.DataFrame({"n": g.size(), "media": g.mean()}).reset_index()
+    pt = p[p.hora.isin(HORAS_PONTA)].groupby(["dia", "h", "subsistema"]).mw.mean().rename("ponta").reset_index()
+    d = d.merge(pt, on=["dia", "h", "subsistema"])
+    d = d[d.n == 24].drop(columns="n")
+    d.insert(0, "rodada", r)
+    d = d.merge(_ref_recente(ofi), on=["subsistema", "rodada"], how="left")
+    d["razao_recente"] = d.media / d.ref_recente
+    return d.melt(id_vars=["rodada", "dia", "h", "subsistema", "ref_recente", "razao_recente"],
+                  value_vars=["media", "ponta"], var_name="metrica", value_name="prev_mw")
+
+
+def nome_metodo(recente, faixa):
+    return "padronizado" + ("+faixa" if faixa else "") + ("+recente" if recente else "")
+
+
+def cenarios(longo, diario, saida, ult=None, ref=None, janela=JANELA_EPOCA, recente=True, faixa=True):
+    arq_ult = saida / "ultima_rodada.csv"
+    if ult is not None:
+        _salvar(ult, arq_ult.name, saida)
+    elif arq_ult.exists():
+        ult = pd.read_csv(arq_ult, sep=";", decimal=",", encoding="utf-8-sig", parse_dates=["rodada", "dia"])
+    if ref is None:
+        ref = ult.rodada.iloc[0] if ult is not None and len(ult) else pd.Timestamp.today().normalize()
+    x = base_cenarios(longo)
+    mod = ajustar_modelo(x, janela, recente, faixa)
+    Q = quantis_dia(mod)
+    c = _mais_proximo(int(_centro_doy(pd.Series([ref])).iloc[0]), Q.centro)
+    _salvar(Q[Q.centro == c].drop(columns="centro"), "cenarios_dia.csv", saida)
+    _salvar(Q, "cenarios_dia_todas_epocas.csv", saida)
+    sem = cenarios_semana(mod, c)
+    _salvar(sem, "cenarios_periodo.csv", saida)
+
+    print("\n" + "=" * 100)
+    print(f"CENÁRIOS (método {nome_metodo(recente, faixa)})  -  época de {ref:%d/%m}: rodadas a ±{janela} dias, todos os anos")
+    print("  r = ajuste sobre a previsão Tempo OK para chegar ao deck; geração do cenário = previsão x (1 + r/100); "
+          "positivo = deck acima")
+    if recente:
+        nv = mod["nivel"][mod["nivel"].subsistema == "SIN"].groupby("metrica")[["k", "m_rec", "m_hist"]].mean()
+        print(f"  nível recente (últimos {JANELA_RECENTE} dias x histórico): " + "; ".join(
+            f"{m} largura x{nv.loc[m].k:.2f}, centro {nv.loc[m].m_rec - nv.loc[m].m_hist:+.2f} larguras"
+            for m in ["media", "ponta"] if m in nv.index))
+    if ult is None or ult.empty:
+        print("  (sem a rodada mais recente: rode com o banco para aplicar os cenários)")
+        return mod
+    cortes = cortes_faixa(diario)
+    u = ult.copy()
+    u["faixa"] = classificar_faixa(u, cortes) if faixa else "todas"
+    u["centro"] = c
+    ap = aplicar_quantis(u, Q)
+    for p in PCOLS:
+        ap[f"ger_{p}_mw"] = ap.prev_mw * (1 + ap[p] / 100)
+    _salvar(ap, "cenarios_aplicados_dia.csv", saida)
+    if not sem.empty:
+        aps = ult.merge(sem, on=CHAVE, how="left")
+        aps["ger_mw"] = aps.prev_mw * (1 + aps.r / 100)
+        _salvar(aps, "cenarios_aplicados_periodo.csv", saida)
+    for s in SUBS_TERMINAL:
+        imprimir_cenarios_gw(ap, s)
+        grafico_cenarios_gw(ap, saida, s)
+    if not sem.empty:
+        imprimir_periodo(sem, ult, mod["n_semanas"])
+    return mod
+
+
+def imprimir_cenarios_gw(ap, sub):
+    r0 = ap.rodada.iloc[0]
+    t = ap[ap.subsistema == sub]
+    if t.empty:
+        return
+    print(f"\n{sub} - eólica em GW, rodada Tempo OK de {r0:%d/%m/%Y} corrigida pelos cenários  "
+          f"(baixo = P10, central = P50, alto = P90)")
+    pon = f"PONTA {HORAS_PONTA[0]}-{HORAS_PONTA[-1] + 1} h"
+    print(f"{'':>5}{'dia':>11}{'faixa':>8}   {'MÉDIA:':<7}{'prev':>6}{'baixo':>7}{'central':>8}{'alto':>7}{'ajuste':>8}"
+          f"   {pon + ':':<15}{'prev':>6}{'baixo':>7}{'central':>8}{'alto':>7}")
+    pv = t.pivot_table(index=["h", "dia", "faixa"], columns="metrica",
+                       values=["prev_mw", "ger_p10_mw", "ger_p50_mw", "ger_p90_mw", "p50"], aggfunc="first")
+    for (h, d, fx), z in pv.iterrows():
+        g = lambda c, m: z[(c, m)] / 1000
+        print(f"{'D+' + str(h):>5}  {SEMANA[d.dayofweek]} {d:%d/%m}{fx:>8}   {'':<7}{g('prev_mw', 'media'):>6.1f}{g('ger_p10_mw', 'media'):>7.1f}"
+              f"{g('ger_p50_mw', 'media'):>8.1f}{g('ger_p90_mw', 'media'):>7.1f}{z[('p50', 'media')]:>+7.1f}%"
+              f"   {'':<15}{g('prev_mw', 'ponta'):>6.1f}{g('ger_p10_mw', 'ponta'):>7.1f}{g('ger_p50_mw', 'ponta'):>8.1f}"
+              f"{g('ger_p90_mw', 'ponta'):>7.1f}")
+
+
+def imprimir_periodo(sem, ult, n):
+    s = sem[(sem.subsistema == "SIN") & (sem.metrica == "media")]
+    u = ult[(ult.subsistema == "SIN") & (ult.metrica == "media")].set_index("h").prev_mw
+    print(f"\nSIN - período D+1..D+9 inteiro (energia média do período e caminho dia a dia; {n} períodos no histórico)")
+    print(f"{'cenário':<22}{'r período':>10}{'GW período':>11}" + "".join(f"{'D+' + str(h):>7}" for h in HORIZONTES))
+    for q in sorted(QS, reverse=True):
+        z = s[s.quantil == q].sort_values("h")
+        gw = (u.reindex(z.h).values * (1 + z.r.values / 100)).mean() / 1000 if len(u) else np.nan
+        print(f"{ROT_Q[q] + f' (P{int(round(100 * q))})':<22}{z.W.iloc[0]:>+9.1f}%{gw:>11.1f}" +
+              "".join(f"{v:>+7.1f}" for v in z.r))
+    print("Para o período inteiro use estes cenários: aplicar o P90 de cada dia em todos os dias exagera"
+          " (os dias não erram todos juntos).")
+
+
+def grafico_cenarios_gw(ap, saida, sub="SIN"):
+    """Previsão da rodada mais recente corrigida (P50) com o valor em cada ponto, faixa P10-P90 e previsão original."""
+    r0 = ap.rodada.iloc[0]
+    fig, ax = plt.subplots(figsize=(12, 5.4))
+    for m, nome, cor, mk, dy in [("ponta", f"Ponta ({HORAS_PONTA[0]}-{HORAS_PONTA[-1] + 1} h)", "#e34948", "o", 9),
+                                 ("media", "Média do dia", "#2a78d6", "s", -15)]:
+        t = ap[(ap.metrica == m) & (ap.subsistema == sub)].sort_values("dia")
+        if t.empty:
+            continue
+        x = t.dia.to_numpy()
+        gw = lambda c: (t[c] / 1000).to_numpy()
+        ax.fill_between(x, gw("ger_p10_mw"), gw("ger_p90_mw"), color=cor, alpha=0.13, lw=0)
+        ax.plot(x, gw("prev_mw"), color=cor, lw=1, ls="--", alpha=0.7)
+        per = f" (período: {gw('ger_p50_mw').mean():.1f} GW)" if m == "media" else ""
+        ax.plot(x, gw("ger_p50_mw"), color=cor, lw=2, marker=mk, ms=6, label=f"{nome} corrigida{per}")
+        for d, v in zip(x, gw("ger_p50_mw")):
+            ax.annotate(f"{v:.1f}", (d, v), textcoords="offset points", xytext=(0, dy), ha="center",
+                        fontsize=8.5, fontweight="bold", color=cor)
+        for c, rot in [("ger_p90_mw", "alto"), ("ger_p10_mw", "baixo")]:
+            ax.annotate(f"{rot} {gw(c)[-1]:.1f}", (x[-1], gw(c)[-1]), textcoords="offset points", xytext=(22, 0),
+                        ha="left", va="center", fontsize=7.5, color=cor)
+    ax.plot([], [], color="#52514e", lw=1, ls="--", label="previsão original Tempo OK")
+    ax.fill_between([], [], [], color="#52514e", alpha=0.13, lw=0, label="faixa baixo (P10) a alto (P90)")
+    t = ap[(ap.metrica == "media") & (ap.subsistema == sub)].sort_values("dia")
+    ax.set_xticks(t.dia, [f"{d:%d/%m}\n{SEMANA[d.dayofweek]} D+{h}\n{fx}" for d, h, fx in zip(t.dia, t.h, t.faixa)], fontsize=8)
+    ax.set_xlim(t.dia.min() - pd.Timedelta(hours=14), t.dia.max() + pd.Timedelta(hours=34))
+    ax.set_ylabel("GW", fontsize=9)
+    ax.margins(y=0.15)
+    _estilo(ax)
+    ax.legend(fontsize=8, frameon=False, loc="upper left", ncol=2)
+    ax.set_title(f"Eólica do {sub} por dia (GW)  -  previsão Tempo OK de {r0:%d/%m/%Y} corrigida pelos cenários "
+                 f"(referência: deck DESSEM)", fontsize=10.5, loc="left")
+    fig.tight_layout()
+    fig.savefig(saida / f"cenarios_gw_{sub}_{r0:%Y%m%d}.png", dpi=130)
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------ calibração fora da amostra
+def _quantis_empiricos(tr, centros, janela):
+    partes = []
+    for c in centros:
+        t = tr[_na_janela(tr.rodada, _data_centro(c), janela)]
+        if t.empty:
+            continue
+        q = t.groupby(CHAVE).r.quantile(QS).unstack()
+        q.columns = PCOLS
+        partes.append(q.reset_index().assign(centro=int(c), faixa="todas", n=0, mu=np.nan, sigma=np.nan))
+    return pd.concat(partes, ignore_index=True).astype({"centro": "int64", "h": "int64"})
+
+
+def _pinball(y, qv, q):
+    d = y - qv
+    return np.where(d >= 0, q * d, (q - 1) * d)
+
+
+METODOS = [("empírico ±15d", None), ("padronizado", (False, False)), ("padronizado+faixa", (False, True)),
+           ("padronizado+recente", (True, False)), ("padronizado+faixa+recente", (True, True))]
+
+
+def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
+    """Cada ano de teste Y é previsto com modelos estimados SÓ com dias anteriores a 01/01/Y.
+    Esperado: 80 % dentro de P10-P90, 10 % acima do alto, 10 % abaixo do baixo. Pinball: menor = melhor."""
+    x = base_cenarios(longo)
+    partes, sem = [], []
+    for Y in sorted(x.rodada.dt.year.unique()):
+        corte = pd.Timestamp(Y, 1, 1)
+        tr, te = x[x.dia < corte], x[x.rodada.dt.year == Y]
+        if te.empty or tr.empty or (tr.dia.max() - tr.dia.min()).days < 300:
+            continue
+        cortes = cortes_faixa(tr.drop_duplicates(["rodada", "dia", "subsistema"]))   # faixa só com o passado
+        tr = tr.assign(faixa=classificar_faixa(tr, cortes))
+        te = te.assign(faixa=classificar_faixa(te, cortes))
+        for nome, cfg in METODOS:
+            if cfg is None:
+                Q = _quantis_empiricos(tr, sorted(te.centro.unique()), janela_emp)
+            else:
+                mod = ajustar_modelo(tr, janela, recente=cfg[0], faixa=cfg[1], semana=(cfg == (True, True) or cfg == (False, False)))
+                Q = quantis_dia(mod)
+                if mod["semana"] is not None and not mod["semana"].empty:
+                    w = semanas(x)
+                    w = w[w.rodada.dt.year == Y].copy()
+                    ew, nw = mod["semana"], mod["nivelW"]
+                    kW = nw["s_rec"] / nw["s_hist"]
+                    w["c"] = w.centro.map(lambda c: _mais_proximo(c, ew.centro))
+                    w = w.merge(ew, left_on="c", right_on="centro", suffixes=("", "_ep"))
+                    for nq, zq in [("q10", mod["zW"][1]), ("q90", mod["zW"][3])]:
+                        w[nq] = w.muW + w.sigmaW * (nw["m_rec"] + kW * (zq - nw["m_hist"]))
+                    sem.append(w.assign(ano_teste=Y, metodo=nome))
+            m = aplicar_quantis(te, Q)
+            partes.append(m.assign(metodo=nome, ano_teste=Y, treino=f"{tr.dia.min():%m/%Y}-{tr.dia.max():%m/%Y}"))
+    if not partes:
+        print("\ncalibração: histórico curto demais (precisa de cerca de 1 ano antes do ano de teste)")
+        return
+    m = pd.concat(partes, ignore_index=True)
+    m["dentro_80"] = m.r.between(m.p10, m.p90)
+    m["dentro_90"] = m.r.between(m.p05, m.p95)
+    m["acima_alto"] = m.r > m.p90
+    m["abaixo_baixo"] = m.r < m.p10
+    m["pinball"] = np.mean([_pinball(m.r, m[p], q) for p, q in zip(PCOLS, QS)], axis=0)
+
+    def resumo(chaves):
+        g = m.groupby(chaves)
+        return pd.DataFrame({"n": g.size(), "dentro_P10_P90_pct": 100 * g.dentro_80.mean(),
+                             "dentro_P5_P95_pct": 100 * g.dentro_90.mean(), "acima_do_alto_pct": 100 * g.acima_alto.mean(),
+                             "abaixo_do_baixo_pct": 100 * g.abaixo_baixo.mean(), "pinball": g.pinball.mean()}).reset_index()
+    cal_h = resumo(["metodo", "metrica", "subsistema", "h"])
+    cal_ano = resumo(["metodo", "ano_teste", "treino", "metrica", "subsistema"])
+    cal_fx = resumo(["metodo", "metrica", "subsistema", "faixa"])
+    for df, nome in [(cal_h, "calibracao_horizonte.csv"), (cal_ano, "calibracao_ano.csv"), (cal_fx, "calibracao_faixa.csv")]:
+        _salvar(df, nome, saida)
+    sp = pd.concat(sem, ignore_index=True) if sem else pd.DataFrame()
+    if len(sp):
+        _salvar(sp, "calibracao_periodos.csv", saida)
+
+    nomes = [n for n, _ in METODOS]
+    for sub in SUBS_TERMINAL:
+        x_ = m[m.subsistema == sub]
+        g = x_.groupby(["metodo", "metrica"])
+        r = pd.DataFrame({"dentro": 100 * g.dentro_80.mean(), "acima": 100 * g.acima_alto.mean(),
+                          "abaixo": 100 * g.abaixo_baixo.mean(), "pinball": g.pinball.mean()})
+        anos = ", ".join(str(int(a)) for a in sorted(x_.ano_teste.unique()))
+        print("\n" + "=" * 100)
+        print(f"CALIBRAÇÃO FORA DA AMOSTRA  -  {sub}, D+1..D+9, anos de teste {anos} (cada um estimado só com os anteriores)")
+        print("  esperado: dentro P10-P90 = 80 % | acima do alto = 10 % | abaixo do baixo = 10 % | pinball: menor = melhor")
+        fx = x_[x_.metrica == "media"].groupby(["metodo", "faixa"]).dentro_80.mean().mul(100).unstack()
+        print(f"{'método':<27}{'métrica':<8}{'dentro':>8}{'acima':>7}{'abaixo':>8}{'pinball':>9}"
+              f"{'dentro por faixa (média): fraco / normal / forte':>52}{'períodos':>10}")
+        for n in nomes:
+            for mt in ["media", "ponta"]:
+                if (n, mt) not in r.index:
+                    continue
+                z = r.loc[(n, mt)]
+                extra = ""
+                if mt == "media" and n in fx.index:
+                    extra = " / ".join(f"{fx.loc[n].get(f, np.nan):.0f} %" for f in FAIXAS)
+                pw = ""
+                if mt == "media" and sub == "SIN" and len(sp) and n in set(sp.metodo):
+                    w = sp[sp.metodo == n]
+                    pw = f"{100 * w.W.between(w.q10, w.q90).mean():.0f} %"
+                print(f"{n:<27}{mt:<8}{z.dentro:>7.0f}%{z.acima:>6.0f}%{z.abaixo:>7.0f}%{z.pinball:>9.3f}{extra:>52}{pw:>10}")
+        rr = x_.groupby("metodo").pinball.mean()
+        print(f"-> menor pinball: {rr.idxmin()}   [por antecedência, ano e faixa em calibracao_*.csv]")
+    if DETALHADO:
+        for sub in SUBS_TERMINAL:
+            t = cal_h[(cal_h.subsistema == sub) & (cal_h.metrica == "media")]
+            print(f"\n{sub} - média diária: dentro P10-P90 (%) por antecedência e método")
+            print(t.pivot(index="h", columns="metodo", values="dentro_P10_P90_pct").reindex(columns=nomes).round(0).to_string())
+            print(f"\n{sub} - média diária: pinball por antecedência e método")
+            print(t.pivot(index="h", columns="metodo", values="pinball").reindex(columns=nomes).round(3).to_string())
+            t = cal_ano[(cal_ano.subsistema == sub)]
+            print(f"\n{sub} - por ano de teste")
+            print(t[["metodo", "ano_teste", "treino", "metrica", "n", "dentro_P10_P90_pct", "acima_do_alto_pct",
+                     "abaixo_do_baixo_pct", "pinball"]].round(2).to_string(index=False))
+
+
 def main():
-    global DETALHADO
+    global DETALHADO, JANELA_RECENTE
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ini", default=INICIO)
     ap.add_argument("--fim", default=None, help="padrão: hoje")
@@ -604,32 +1099,46 @@ def main():
     ap.add_argument("--oficial-csv", help="teste: CSV com rodada_dia;valido_para;submercado;previsao;rev")
     ap.add_argument("--saida", default=str(OUTPUT_DIR))
     ap.add_argument("--detalhado", action="store_true", help="terminal completo")
-    ap.add_argument("--so-relatorio", action="store_true", help="sem banco: refaz o relatório a partir do erro_diario.csv")
+    ap.add_argument("--so-relatorio", action="store_true", help="sem banco: refaz tudo a partir do erro_diario.csv")
+    ap.add_argument("--sem-faixa", dest="faixa", action="store_false", help="cenários sem a faixa de vento")
+    ap.add_argument("--sem-nivel-recente", dest="recente", action="store_false", help="cenários sem o nível recente")
+    ap.add_argument("--janela", type=int, default=JANELA_EPOCA, help="± dias em torno da data para a época (padrão 30)")
+    ap.add_argument("--dias-recentes", type=int, default=JANELA_RECENTE, help="janela do nível recente (padrão 365)")
+    ap.add_argument("--data-ref", default=None, help="data de referência da época (padrão: rodada mais recente)")
+    ap.add_argument("--sem-calibracao", dest="calibrar", action="store_false", help="pula a calibração (mais rápido)")
     a = ap.parse_args()
     DETALHADO = a.detalhado
+    JANELA_RECENTE = a.dias_recentes
 
     ini = pd.Timestamp(a.ini)
     fim = pd.Timestamp(a.fim) if a.fim else pd.Timestamp.today().normalize()
     saida = Path(a.saida)
     saida.mkdir(parents=True, exist_ok=True)
+    ref = pd.Timestamp(a.data_ref) if a.data_ref else None
+    ult = None
     if a.so_relatorio:
-        d = pd.read_csv(saida / "erro_diario.csv", sep=";", decimal=",", encoding="utf-8-sig", parse_dates=["rodada", "dia"])
-        relatorio(longo_diario(excluir_dias(d)), saida)
-        print(f"\nsaídas em {saida}", flush=True)
-        return
-
-    eng = None if (a.prev_csv and a.oficial_csv) else engine_banco()
-    prev = ler_previsao(eng, ini, fim, a.prev_csv)
-    ofi = ler_oficial(eng, ini - pd.Timedelta(days=JANELA_FAIXA + 5), fim, a.oficial_csv)
-    checar_alinhamento(prev, ofi)
-    pares = montar_pares(prev, ofi)
-    pares = excluir_dias(pares[(pares.dia >= ini) & (pares.dia <= fim)])
-    diario = erro_diario(pares, ofi)
-    cobertura(prev, ofi[ofi.valido_para >= ini], diario, saida)
-
-    pares.to_csv(saida / "pares_horarios.csv.gz", sep=";", decimal=",", index=False, float_format="%.1f")
-    _salvar(diario, "erro_diario.csv", saida)
-    relatorio(longo_diario(diario), saida, erro_perfil(pares))
+        diario = pd.read_csv(saida / "erro_diario.csv", sep=";", decimal=",", encoding="utf-8-sig",
+                             parse_dates=["rodada", "dia"])
+        diario = excluir_dias(diario)
+        longo = longo_diario(diario)
+        relatorio(longo, saida)
+    else:
+        eng = None if (a.prev_csv and a.oficial_csv) else engine_banco()
+        prev = ler_previsao(eng, ini, fim, a.prev_csv)
+        ofi = ler_oficial(eng, ini - pd.Timedelta(days=JANELA_FAIXA + 5), fim, a.oficial_csv)
+        checar_alinhamento(prev, ofi)
+        pares = montar_pares(prev, ofi)
+        pares = excluir_dias(pares[(pares.dia >= ini) & (pares.dia <= fim)])
+        diario = erro_diario(pares, ofi)
+        cobertura(prev, ofi[ofi.valido_para >= ini], diario, saida)
+        pares.to_csv(saida / "pares_horarios.csv.gz", sep=";", decimal=",", index=False, float_format="%.1f")
+        _salvar(diario, "erro_diario.csv", saida)
+        longo = longo_diario(diario)
+        relatorio(longo, saida, erro_perfil(pares))
+        ult = ultima_rodada(prev, ofi)
+    cenarios(longo, diario, saida, ult, ref, a.janela, a.recente, a.faixa)
+    if a.calibrar:
+        calibracao(longo, saida, a.janela)
     print(f"\nsaídas em {saida}", flush=True)
 
 
