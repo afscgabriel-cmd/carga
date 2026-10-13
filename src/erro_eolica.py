@@ -20,15 +20,18 @@ prevista (fraco / normal / forte, pela previsão do dia contra a média do deck 
 mais o IC 95 % do viés por bootstrap em blocos semanais. As tabelas por ano e por faixa testam se o erro em %
 é estável (unidade dos cenários): se for, os cenários seguem o método da carga.
 
-Cenários (Fase 3, método padronizado da carga + faixa de vento): centro e largura da época (±30 dias, todos os anos),
-formato das caudas por faixa de vento (histórico todo), nível recente (365 dias), período D+1..D+9 pelo caminho
-condicional. Aplicados à rodada mais recente: tabela e gráfico em GW (SIN e NE).
+Cenários (Fase 3, método padronizado da carga + faixa de vento): centro e largura da época (±60 dias, todos os anos),
+formato das caudas por faixa de vento (histórico todo), período D+1..D+9 pelo caminho condicional. Escolha feita pela
+calibração de 13/10/2026 (testes 2025 e 2026): ±60 d e faixa tiveram o menor pinball; o nível recente não ajudou
+(fica opcional). Baixo = P5 (o deck caiu abaixo do P10 em 12-13 % dos dias, acima do P90 em só 7-9 %). Aplicados à rodada mais recente: tabela e gráfico em GW (SIN e NE).
 Calibração (Fase 4): cada ano testado com o modelo estimado só com os anos anteriores; compara empírico, padronizado,
 +faixa, +recente e +faixa+recente (cobertura P10-P90, caudas, pinball, cobertura por faixa).
 
 Uso:
     python erro_eolica.py                       # banco, desde INICIO (terminal enxuto: SIN e NE)
-    python erro_eolica.py --sem-faixa           # cenários sem a faixa de vento (idem --sem-nivel-recente)
+    python erro_eolica.py --sem-faixa           # cenários sem a faixa de vento
+    python erro_eolica.py --com-nivel-recente   # cenários com o nível recente (últimos 365 dias)
+    python erro_eolica.py --testes              # sem banco: sensibilidade da janela da época e do nível recente
     python erro_eolica.py --sem-calibracao      # mais rápido
     python erro_eolica.py --detalhado           # terminal completo (todos os subsistemas, mês x antecedência)
     python erro_eolica.py --ini 2024-01-01
@@ -636,7 +639,7 @@ QS = [0.05, 0.10, 0.50, 0.90, 0.95]
 PCOLS = [f"p{int(round(100 * q)):02d}" for q in QS]
 ZCOLS = [f"z{c[1:]}" for c in PCOLS]
 ROT_Q = {0.95: "estresse alto", 0.90: "alto", 0.50: "central", 0.10: "baixo", 0.05: "estresse baixo"}
-JANELA_EPOCA = 30
+JANELA_EPOCA = 60                 # ± dias em torno da data (calibração: ±60 melhor que ±15/30/45)
 JANELA_RECENTE = 365
 MIN_RECENTE = 60
 PASSO_CENTRO = 7
@@ -778,7 +781,7 @@ def modelo_semana(x, ep, janela=JANELA_EPOCA):
     return ew, zW, beta, len(w), nivelW
 
 
-def ajustar_modelo(x, janela=JANELA_EPOCA, recente=True, faixa=True, semana=True):
+def ajustar_modelo(x, janela=JANELA_EPOCA, recente=False, faixa=True, semana=True):
     ep = tabela_epoca(x, janela)
     forma, nivel = forma_caudas(x, ep, faixa)
     ew, zW, beta, n_sem, nivelW = modelo_semana(x, ep, janela) if semana else (None, None, None, 0, None)
@@ -852,7 +855,7 @@ def nome_metodo(recente, faixa):
     return "padronizado" + ("+faixa" if faixa else "") + ("+recente" if recente else "")
 
 
-def cenarios(longo, diario, saida, ult=None, ref=None, janela=JANELA_EPOCA, recente=True, faixa=True):
+def cenarios(longo, diario, saida, ult=None, ref=None, janela=JANELA_EPOCA, recente=False, faixa=True):
     arq_ult = saida / "ultima_rodada.csv"
     if ult is not None:
         _salvar(ult, arq_ult.name, saida)
@@ -907,17 +910,17 @@ def imprimir_cenarios_gw(ap, sub):
     if t.empty:
         return
     print(f"\n{sub} - eólica em GW, rodada Tempo OK de {r0:%d/%m/%Y} corrigida pelos cenários  "
-          f"(baixo = P10, central = P50, alto = P90)")
+          f"(baixo = P5, central = P50, alto = P90)")
     pon = f"PONTA {HORAS_PONTA[0]}-{HORAS_PONTA[-1] + 1} h"
     print(f"{'':>5}{'dia':>11}{'faixa':>8}   {'MÉDIA:':<7}{'prev':>6}{'baixo':>7}{'central':>8}{'alto':>7}{'ajuste':>8}"
           f"   {pon + ':':<15}{'prev':>6}{'baixo':>7}{'central':>8}{'alto':>7}")
     pv = t.pivot_table(index=["h", "dia", "faixa"], columns="metrica",
-                       values=["prev_mw", "ger_p10_mw", "ger_p50_mw", "ger_p90_mw", "p50"], aggfunc="first")
+                       values=["prev_mw", "ger_p05_mw", "ger_p50_mw", "ger_p90_mw", "p50"], aggfunc="first")
     for (h, d, fx), z in pv.iterrows():
         g = lambda c, m: z[(c, m)] / 1000
-        print(f"{'D+' + str(h):>5}  {SEMANA[d.dayofweek]} {d:%d/%m}{fx:>8}   {'':<7}{g('prev_mw', 'media'):>6.1f}{g('ger_p10_mw', 'media'):>7.1f}"
+        print(f"{'D+' + str(h):>5}  {SEMANA[d.dayofweek]} {d:%d/%m}{fx:>8}   {'':<7}{g('prev_mw', 'media'):>6.1f}{g('ger_p05_mw', 'media'):>7.1f}"
               f"{g('ger_p50_mw', 'media'):>8.1f}{g('ger_p90_mw', 'media'):>7.1f}{z[('p50', 'media')]:>+7.1f}%"
-              f"   {'':<15}{g('prev_mw', 'ponta'):>6.1f}{g('ger_p10_mw', 'ponta'):>7.1f}{g('ger_p50_mw', 'ponta'):>8.1f}"
+              f"   {'':<15}{g('prev_mw', 'ponta'):>6.1f}{g('ger_p05_mw', 'ponta'):>7.1f}{g('ger_p50_mw', 'ponta'):>8.1f}"
               f"{g('ger_p90_mw', 'ponta'):>7.1f}")
 
 
@@ -946,18 +949,18 @@ def grafico_cenarios_gw(ap, saida, sub="SIN"):
             continue
         x = t.dia.to_numpy()
         gw = lambda c: (t[c] / 1000).to_numpy()
-        ax.fill_between(x, gw("ger_p10_mw"), gw("ger_p90_mw"), color=cor, alpha=0.13, lw=0)
+        ax.fill_between(x, gw("ger_p05_mw"), gw("ger_p90_mw"), color=cor, alpha=0.13, lw=0)
         ax.plot(x, gw("prev_mw"), color=cor, lw=1, ls="--", alpha=0.7)
         per = f" (período: {gw('ger_p50_mw').mean():.1f} GW)" if m == "media" else ""
         ax.plot(x, gw("ger_p50_mw"), color=cor, lw=2, marker=mk, ms=6, label=f"{nome} corrigida{per}")
         for d, v in zip(x, gw("ger_p50_mw")):
             ax.annotate(f"{v:.1f}", (d, v), textcoords="offset points", xytext=(0, dy), ha="center",
                         fontsize=8.5, fontweight="bold", color=cor)
-        for c, rot in [("ger_p90_mw", "alto"), ("ger_p10_mw", "baixo")]:
+        for c, rot in [("ger_p90_mw", "alto"), ("ger_p05_mw", "baixo")]:
             ax.annotate(f"{rot} {gw(c)[-1]:.1f}", (x[-1], gw(c)[-1]), textcoords="offset points", xytext=(22, 0),
                         ha="left", va="center", fontsize=7.5, color=cor)
     ax.plot([], [], color="#52514e", lw=1, ls="--", label="previsão original Tempo OK")
-    ax.fill_between([], [], [], color="#52514e", alpha=0.13, lw=0, label="faixa baixo (P10) a alto (P90)")
+    ax.fill_between([], [], [], color="#52514e", alpha=0.13, lw=0, label="faixa baixo (P5) a alto (P90)")
     t = ap[(ap.metrica == "media") & (ap.subsistema == sub)].sort_values("dia")
     ax.set_xticks(t.dia, [f"{d:%d/%m}\n{SEMANA[d.dayofweek]} D+{h}\n{fx}" for d, h, fx in zip(t.dia, t.h, t.faixa)], fontsize=8)
     ax.set_xlim(t.dia.min() - pd.Timedelta(hours=14), t.dia.max() + pd.Timedelta(hours=34))
@@ -1104,8 +1107,9 @@ def testes_sensibilidade(longo, saida):
     global JANELA_RECENTE
     base_rec = JANELA_RECENTE
     metodos = [("padronizado", (False, False)), ("padronizado+recente", (True, False)), ("padronizado+faixa", (False, True))]
-    configs = [("época ±30 d, recente 365 d (padrão)", 30, 365), ("época ±15 d", 15, 365), ("época ±45 d", 45, 365),
-               ("época ±60 d", 60, 365), ("recente 180 d", 30, 180), ("recente 730 d", 30, 730)]
+    configs = [("época ±60 d (padrão)", 60, 365), ("época ±15 d", 15, 365), ("época ±30 d", 30, 365),
+               ("época ±45 d", 45, 365), ("época ±90 d", 90, 365), ("época ±60 d, recente 180 d", 60, 180),
+               ("época ±60 d, recente 730 d", 60, 730)]
     linhas = []
     for rot, jan, rec in configs:
         JANELA_RECENTE = rec
@@ -1151,8 +1155,9 @@ def main():
     ap.add_argument("--detalhado", action="store_true", help="terminal completo")
     ap.add_argument("--so-relatorio", action="store_true", help="sem banco: refaz tudo a partir do erro_diario.csv")
     ap.add_argument("--sem-faixa", dest="faixa", action="store_false", help="cenários sem a faixa de vento")
-    ap.add_argument("--sem-nivel-recente", dest="recente", action="store_false", help="cenários sem o nível recente")
-    ap.add_argument("--janela", type=int, default=JANELA_EPOCA, help="± dias em torno da data para a época (padrão 30)")
+    ap.add_argument("--com-nivel-recente", dest="recente", action="store_true",
+                    help="cenários com o nível recente (padrão: sem; não melhorou a calibração)")
+    ap.add_argument("--janela", type=int, default=JANELA_EPOCA, help="± dias em torno da data para a época (padrão 60)")
     ap.add_argument("--dias-recentes", type=int, default=JANELA_RECENTE, help="janela do nível recente (padrão 365)")
     ap.add_argument("--data-ref", default=None, help="data de referência da época (padrão: rodada mais recente)")
     ap.add_argument("--sem-calibracao", dest="calibrar", action="store_false", help="pula a calibração (mais rápido)")
