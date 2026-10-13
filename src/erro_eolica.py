@@ -789,6 +789,10 @@ def ajustar_modelo(x, janela=JANELA_EPOCA, recente=False, faixa=True, semana=Tru
         nivel = nivel.assign(m_rec=nivel.m_hist, s_rec=nivel.s_hist)
         if nivelW:
             nivelW = dict(nivelW, m_rec=nivelW["m_hist"], s_rec=nivelW["s_hist"])
+    elif recente == "centro":                     # só o centro vem do recente; a largura fica a do histórico
+        nivel = nivel.assign(s_rec=nivel.s_hist)
+        if nivelW:
+            nivelW = dict(nivelW, s_rec=nivelW["s_hist"])
     nivel["k"] = nivel.s_rec / nivel.s_hist
     return {"epoca": ep, "forma": forma, "nivel": nivel, "semana": ew, "zW": zW, "beta": beta, "nivelW": nivelW,
             "n_semanas": n_sem, "recente": recente, "faixa": faixa}
@@ -852,7 +856,8 @@ def ultima_rodada(prev, ofi):
 
 
 def nome_metodo(recente, faixa):
-    return "padronizado" + ("+faixa" if faixa else "") + ("+recente" if recente else "")
+    return "padronizado" + ("+faixa" if faixa else "") + ("+centro recente" if recente == "centro" else
+                                                          "+recente" if recente else "")
 
 
 def cenarios(longo, diario, saida, ult=None, ref=None, janela=JANELA_EPOCA, recente=False, faixa=True):
@@ -994,7 +999,8 @@ def _pinball(y, qv, q):
 
 
 METODOS = [("empírico ±15d", None), ("padronizado", (False, False)), ("padronizado+faixa", (False, True)),
-           ("padronizado+recente", (True, False)), ("padronizado+faixa+recente", (True, True))]
+           ("padronizado+recente", (True, False)), ("padronizado+faixa+recente", (True, True)),
+           ("padronizado+centro recente", ("centro", False)), ("padronizado+faixa+centro recente", ("centro", True))]
 
 
 def _rodar_calibracao(longo, janela=JANELA_EPOCA, metodos=METODOS, janela_emp=15, com_periodo=True):
@@ -1014,7 +1020,7 @@ def _rodar_calibracao(longo, janela=JANELA_EPOCA, metodos=METODOS, janela_emp=15
                 Q = _quantis_empiricos(tr, sorted(te.centro.unique()), janela_emp)
             else:
                 mod = ajustar_modelo(tr, janela, recente=cfg[0], faixa=cfg[1],
-                                     semana=com_periodo and cfg in ((True, True), (False, False)))
+                                     semana=com_periodo and cfg in ((False, True), ("centro", True)))
                 Q = quantis_dia(mod)
                 if mod["semana"] is not None and not mod["semana"].empty:
                     w = semanas(x)
@@ -1071,7 +1077,7 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
         print(f"CALIBRAÇÃO FORA DA AMOSTRA  -  {sub}, D+1..D+9, anos de teste {anos} (cada um estimado só com os anteriores)")
         print("  esperado: dentro P10-P90 = 80 % | acima do alto = 10 % | abaixo do baixo = 10 % | pinball: menor = melhor")
         fx = x_[x_.metrica == "media"].groupby(["metodo", "faixa"]).dentro_80.mean().mul(100).unstack()
-        print(f"{'método':<27}{'métrica':<8}{'dentro':>8}{'acima':>7}{'abaixo':>8}{'pinball':>9}"
+        print(f"{'método':<34}{'métrica':<8}{'dentro':>8}{'acima':>7}{'abaixo':>8}{'pinball':>9}"
               f"{'dentro por faixa (média): fraco / normal / forte':>52}{'períodos':>10}")
         for n in nomes:
             for mt in ["media", "ponta"]:
@@ -1085,7 +1091,7 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
                 if mt == "media" and sub == "SIN" and len(sp) and n in set(sp.metodo):
                     w = sp[sp.metodo == n]
                     pw = f"{100 * w.W.between(w.q10, w.q90).mean():.0f} %"
-                print(f"{n:<27}{mt:<8}{z.dentro:>7.0f}%{z.acima:>6.0f}%{z.abaixo:>7.0f}%{z.pinball:>9.3f}{extra:>52}{pw:>10}")
+                print(f"{n:<34}{mt:<8}{z.dentro:>7.0f}%{z.acima:>6.0f}%{z.abaixo:>7.0f}%{z.pinball:>9.3f}{extra:>52}{pw:>10}")
         rr = x_.groupby("metodo").pinball.mean()
         print(f"-> menor pinball: {rr.idxmin()}   [por antecedência, ano e faixa em calibracao_*.csv]")
         imprimir_calibracao_ano(x_, sub)
@@ -1106,7 +1112,8 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
 GRUPOS_H = [("D+1", [1]), ("D+2..4", [2, 3, 4]), ("D+5..9", [5, 6, 7, 8, 9])]
 
 
-def imprimir_calibracao_ano(x_, sub, metodos=("padronizado", "padronizado+faixa", "padronizado+faixa+recente")):
+def imprimir_calibracao_ano(x_, sub, metodos=("padronizado", "padronizado+faixa", "padronizado+centro recente",
+                                              "padronizado+faixa+centro recente")):
     """Calibração separada por ano de teste (média diária): as faixas estão largas ou estreitas para o modelo de hoje?
     Largura = P90 - P10 em pontos percentuais de r (média dos dias)."""
     x = x_[(x_.metrica == "media") & x_.metodo.isin(metodos)].copy()
@@ -1115,12 +1122,12 @@ def imprimir_calibracao_ano(x_, sub, metodos=("padronizado", "padronizado+faixa"
     x["largura"] = x.p90 - x.p10
     print(f"\n{sub} - POR ANO DE TESTE (média diária). Faixa larga demais: dentro > 85 % e acima/abaixo < 7 %; "
           f"estreita demais: dentro < 75 %")
-    print(f"{'método':<27}{'ano':>5}{'dias':>7}{'dentro':>8}{'acima':>7}{'abaixo':>8}{'largura P10-P90':>17}"
+    print(f"{'método':<34}{'ano':>5}{'dias':>7}{'dentro':>8}{'acima':>7}{'abaixo':>8}{'largura P10-P90':>17}"
           + "".join(f"{'dentro ' + g:>15}" for g, _ in GRUPOS_H) + f"{'viés real':>11}{'centro P50':>12}")
     for met in metodos:
         for ano, g in x[x.metodo == met].groupby("ano_teste"):
             grupos = "".join(f"{100 * g[g.h.isin(hs)].dentro_80.mean():>14.0f}%" for _, hs in GRUPOS_H)
-            print(f"{met:<27}{int(ano):>5}{g.dia.nunique():>7}{100 * g.dentro_80.mean():>7.0f}%{100 * g.acima_alto.mean():>6.0f}%"
+            print(f"{met:<34}{int(ano):>5}{g.dia.nunique():>7}{100 * g.dentro_80.mean():>7.0f}%{100 * g.acima_alto.mean():>6.0f}%"
                   f"{100 * g.abaixo_baixo.mean():>7.0f}%{g.largura.mean():>15.1f} pp{grupos}"
                   f"{g.r.median():>+10.1f}%{g.p50.median():>+11.1f}%")
     print("  viés real = mediana do r observado no ano; centro P50 = mediana do cenário central usado. Se o centro ficar"
@@ -1180,8 +1187,10 @@ def main():
     ap.add_argument("--detalhado", action="store_true", help="terminal completo")
     ap.add_argument("--so-relatorio", action="store_true", help="sem banco: refaz tudo a partir do erro_diario.csv")
     ap.add_argument("--sem-faixa", dest="faixa", action="store_false", help="cenários sem a faixa de vento")
-    ap.add_argument("--com-nivel-recente", dest="recente", action="store_true",
-                    help="cenários com o nível recente (padrão: sem; não melhorou a calibração)")
+    ap.add_argument("--com-nivel-recente", dest="recente", action="store_const", const=True, default=False,
+                    help="cenários com o nível recente no centro e na largura (não melhorou a calibração)")
+    ap.add_argument("--centro-recente", dest="recente", action="store_const", const="centro",
+                    help="cenários com só o centro ajustado pelo viés dos últimos 365 dias (largura do histórico)")
     ap.add_argument("--janela", type=int, default=JANELA_EPOCA, help="± dias em torno da data para a época (padrão 60)")
     ap.add_argument("--dias-recentes", type=int, default=JANELA_RECENTE, help="janela do nível recente (padrão 365)")
     ap.add_argument("--data-ref", default=None, help="data de referência da época (padrão: rodada mais recente)")
