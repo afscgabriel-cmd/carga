@@ -392,9 +392,9 @@ def cobertura(prev, ofi, diario, saida):
     c.index.name = "mes"
     _salvar(c.reset_index().astype({"mes": str}), "cobertura.csv", saida)
     sub = diario[diario.h == 1].groupby("subsistema").dia.agg(["min", "max", "nunique"])
-    print("pares D+1 por subsistema: " + "; ".join(f"{s} {r['min']:%m/%Y} a {r['max']:%m/%Y} ({r['nunique']:,} dias)"
+    log("pares D+1 por subsistema: " + "; ".join(f"{s} {r['min']:%m/%Y} a {r['max']:%m/%Y} ({r['nunique']:,} dias)"
                                                     for s, r in sub.reindex([x for x in SUBS if x in sub.index]).iterrows())
-          + f"  (SIN = {' + '.join(SUBS_SIN)})", flush=True)
+        + f"  (SIN = {' + '.join(SUBS_SIN)})")
     t = c.dias_pareados_d1
     t = t[t.index >= t[t > 0].index.min()]
     falhas = t.iloc[1:-1][t.iloc[1:-1] < 20]
@@ -429,7 +429,7 @@ def piores_dias(longo, saida, sub="SIN", n=5):
     for _, z in t.iterrows():
         print(f"{z.dia:%d/%m/%Y}  {z.rodada:%d/%m/%Y}{'D+' + str(z.h):>5}{z.faixa:>8}{z.prev_gw:>9.1f}{z.ofi_gw:>9.1f}"
               f"{z.r:>+8.1f}  " + "".join(f"{z.get(f'r_{c}', np.nan):>+7.1f}" for c in SUBS[:4]))
-    print(f"[ponta e lista completa em piores_dias.csv; dia com dado ruim -> {DIAS_EXCLUIDOS_CSV.name}]")
+    print(f"[lista completa em piores_dias.csv; dado ruim -> {DIAS_EXCLUIDOS_CSV.name}]")
 
 
 # ------------------------------------------------------------------ terminal
@@ -609,11 +609,12 @@ def relatorio(longo, saida, perfil=None):
     grafico_mes_horizonte(res_mh, saida)
     grafico_estabilidade(res_ano, res_faixa, saida)
 
-    piores_dias(longo, saida)
-    for s in (SUBS if DETALHADO else SUBS_TERMINAL):
+    piores_dias(longo, saida, n=3)
+    for s in (SUBS if DETALHADO else ["SIN"]):
         imprimir_quadro(res_h, s)
-    for s in SUBS_TERMINAL:
-        imprimir_estabilidade(res_ano, res_faixa, s)
+    if DETALHADO:
+        for s in SUBS_TERMINAL:
+            imprimir_estabilidade(res_ano, res_faixa, s)
     if DETALHADO:
         for s in SUBS_TERMINAL:
             t = res_mh[(res_mh.metrica == "media") & (res_mh.subsistema == s)]
@@ -1045,7 +1046,7 @@ def _rodar_calibracao(longo, janela=JANELA_EPOCA, metodos=METODOS, janela_emp=15
     return m, sem
 
 
-def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
+def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15, em_uso="padronizado+faixa"):
     """Esperado: 80 % dentro de P10-P90, 10 % acima do alto, 10 % abaixo do baixo. Pinball: menor = melhor."""
     m, sem = _rodar_calibracao(longo, janela, METODOS, janela_emp)
     if m is None:
@@ -1067,6 +1068,9 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
         _salvar(sp, "calibracao_periodos.csv", saida)
 
     nomes = [n for n, _ in METODOS]
+    if not DETALHADO:
+        calibracao_curta(m, sp, em_uso)
+        return
     for sub in SUBS_TERMINAL:
         x_ = m[m.subsistema == sub]
         g = x_.groupby(["metodo", "metrica"])
@@ -1107,6 +1111,30 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
             print(t[["metodo", "ano_teste", "treino", "metrica", "n", "dentro_P10_P90_pct", "acima_do_alto_pct",
                      "abaixo_do_baixo_pct", "pinball"]].round(2).to_string(index=False))
 
+
+
+def calibracao_curta(m, sp, em_uso):
+    """Terminal enxuto: o método em uso contra o padronizado simples e o empírico, SIN e NE, média diária."""
+    metodos = [em_uso] + [n for n in ("padronizado", "empírico ±15d") if n != em_uso]
+    anos = sorted(int(a) for a in m.ano_teste.unique())
+    print("\n" + "=" * 100)
+    print(f"CALIBRAÇÃO (fora da amostra, testes {', '.join(map(str, anos))}; média diária, D+1..D+9)  "
+          f"meta: 80 % dentro de P10-P90, 10 % acima, 10 % abaixo")
+    print(f"{'':<5}{'método':<36}{'dentro':>7}{'acima':>7}{'abaixo':>8}{'pinball':>9}"
+          + "".join(f"{'dentro ' + str(a):>13}" for a in anos))
+    for sub in SUBS_TERMINAL:
+        for i, n in enumerate(metodos):
+            g = m[(m.subsistema == sub) & (m.metrica == "media") & (m.metodo == n)]
+            if g.empty:
+                continue
+            rot = n + ("  (em uso)" if n == em_uso else "")
+            por_ano = "".join(f"{100 * g[g.ano_teste == a].dentro_80.mean():>12.0f}%" for a in anos)
+            print(f"{sub if i == 0 else '':<5}{rot:<36}{100 * g.dentro_80.mean():>6.0f}%{100 * g.acima_alto.mean():>6.0f}%"
+                  f"{100 * g.abaixo_baixo.mean():>7.0f}%{g.pinball.mean():>9.3f}{por_ano}")
+    if len(sp) and em_uso in set(sp.metodo):
+        w = sp[sp.metodo == em_uso]
+        print(f"período D+1..D+9 (SIN): {100 * w.W.between(w.q10, w.q90).mean():.0f} % dentro de P10-P90")
+    print("[todos os métodos, por antecedência, ano e faixa: --detalhado e calibracao_*.csv]")
 
 
 GRUPOS_H = [("D+1", [1]), ("D+2..4", [2, 3, 4]), ("D+5..9", [5, 6, 7, 8, 9])]
@@ -1234,7 +1262,7 @@ def main():
         ult = ultima_rodada(prev, ofi)
     cenarios(longo, diario, saida, ult, ref, a.janela, a.recente, a.faixa)
     if a.calibrar:
-        calibracao(longo, saida, a.janela)
+        calibracao(longo, saida, a.janela, em_uso=nome_metodo(a.recente, a.faixa))
     print(f"\nsaídas em {saida}", flush=True)
 
 
