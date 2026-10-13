@@ -994,9 +994,8 @@ METODOS = [("empírico ±15d", None), ("padronizado", (False, False)), ("padroni
            ("padronizado+recente", (True, False)), ("padronizado+faixa+recente", (True, True))]
 
 
-def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
-    """Cada ano de teste Y é previsto com modelos estimados SÓ com dias anteriores a 01/01/Y.
-    Esperado: 80 % dentro de P10-P90, 10 % acima do alto, 10 % abaixo do baixo. Pinball: menor = melhor."""
+def _rodar_calibracao(longo, janela=JANELA_EPOCA, metodos=METODOS, janela_emp=15, com_periodo=True):
+    """Cada ano de teste Y é previsto com modelos estimados SÓ com dias anteriores a 01/01/Y."""
     x = base_cenarios(longo)
     partes, sem = [], []
     for Y in sorted(x.rodada.dt.year.unique()):
@@ -1007,11 +1006,12 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
         cortes = cortes_faixa(tr.drop_duplicates(["rodada", "dia", "subsistema"]))   # faixa só com o passado
         tr = tr.assign(faixa=classificar_faixa(tr, cortes))
         te = te.assign(faixa=classificar_faixa(te, cortes))
-        for nome, cfg in METODOS:
+        for nome, cfg in metodos:
             if cfg is None:
                 Q = _quantis_empiricos(tr, sorted(te.centro.unique()), janela_emp)
             else:
-                mod = ajustar_modelo(tr, janela, recente=cfg[0], faixa=cfg[1], semana=(cfg == (True, True) or cfg == (False, False)))
+                mod = ajustar_modelo(tr, janela, recente=cfg[0], faixa=cfg[1],
+                                     semana=com_periodo and cfg in ((True, True), (False, False)))
                 Q = quantis_dia(mod)
                 if mod["semana"] is not None and not mod["semana"].empty:
                     w = semanas(x)
@@ -1026,14 +1026,22 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
             m = aplicar_quantis(te, Q)
             partes.append(m.assign(metodo=nome, ano_teste=Y, treino=f"{tr.dia.min():%m/%Y}-{tr.dia.max():%m/%Y}"))
     if not partes:
-        print("\ncalibração: histórico curto demais (precisa de cerca de 1 ano antes do ano de teste)")
-        return
+        return None, []
     m = pd.concat(partes, ignore_index=True)
     m["dentro_80"] = m.r.between(m.p10, m.p90)
     m["dentro_90"] = m.r.between(m.p05, m.p95)
     m["acima_alto"] = m.r > m.p90
     m["abaixo_baixo"] = m.r < m.p10
     m["pinball"] = np.mean([_pinball(m.r, m[p], q) for p, q in zip(PCOLS, QS)], axis=0)
+    return m, sem
+
+
+def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
+    """Esperado: 80 % dentro de P10-P90, 10 % acima do alto, 10 % abaixo do baixo. Pinball: menor = melhor."""
+    m, sem = _rodar_calibracao(longo, janela, METODOS, janela_emp)
+    if m is None:
+        print("\ncalibração: histórico curto demais (precisa de cerca de 1 ano antes do ano de teste)")
+        return
 
     def resumo(chaves):
         g = m.groupby(chaves)
@@ -1090,6 +1098,48 @@ def calibracao(longo, saida, janela=JANELA_EPOCA, janela_emp=15):
                      "abaixo_do_baixo_pct", "pinball"]].round(2).to_string(index=False))
 
 
+
+def testes_sensibilidade(longo, saida):
+    """Calibração fora da amostra de variações do método: janela da época e janela do nível recente."""
+    global JANELA_RECENTE
+    base_rec = JANELA_RECENTE
+    metodos = [("padronizado", (False, False)), ("padronizado+recente", (True, False)), ("padronizado+faixa", (False, True))]
+    configs = [("época ±30 d, recente 365 d (padrão)", 30, 365), ("época ±15 d", 15, 365), ("época ±45 d", 45, 365),
+               ("época ±60 d", 60, 365), ("recente 180 d", 30, 180), ("recente 730 d", 30, 730)]
+    linhas = []
+    for rot, jan, rec in configs:
+        JANELA_RECENTE = rec
+        m, _ = _rodar_calibracao(longo, jan, metodos, com_periodo=False)
+        if m is None:
+            continue
+        for (met, sub, mt), g in m.groupby(["metodo", "subsistema", "metrica"]):
+            if sub not in SUBS_TERMINAL:
+                continue
+            if "recente" not in met and rec != 365:          # a janela do nível recente não muda os métodos sem ele
+                continue
+            fx = g.groupby("faixa").dentro_80.mean().mul(100)
+            linhas.append({"teste": rot, "metodo": met, "subsistema": sub, "metrica": mt, "n": len(g),
+                           "dentro": 100 * g.dentro_80.mean(), "acima": 100 * g.acima_alto.mean(),
+                           "abaixo": 100 * g.abaixo_baixo.mean(), "pinball": g.pinball.mean(),
+                           **{f"dentro_{f}": fx.get(f, np.nan) for f in FAIXAS}})
+        print(f"  teste concluído: {rot}", flush=True)
+    JANELA_RECENTE = base_rec
+    t = pd.DataFrame(linhas)
+    _salvar(t, "testes_sensibilidade.csv", saida)
+    for sub in SUBS_TERMINAL:
+        print("\n" + "=" * 100)
+        print(f"TESTES DE SENSIBILIDADE  -  {sub}, D+1..D+9, calibração fora da amostra (esperado: 80 / 10 / 10 %; "
+              f"pinball menor = melhor)")
+        print(f"{'teste':<36}{'método':<27}{'métrica':<7}{'dentro':>7}{'acima':>7}{'abaixo':>7}{'pinball':>9}"
+              f"{'fraco':>7}{'normal':>7}{'forte':>7}")
+        for _, z in t[t.subsistema == sub].iterrows():
+            print(f"{z.teste:<36}{z.metodo:<27}{z.metrica:<7}{z.dentro:>6.0f}%{z.acima:>6.0f}%{z.abaixo:>6.0f}%"
+                  f"{z.pinball:>9.3f}{z.dentro_fraco:>6.0f}%{z.dentro_normal:>6.0f}%{z.dentro_forte:>6.0f}%")
+        b = t[t.subsistema == sub].groupby(["teste", "metodo"]).pinball.mean()
+        print(f"-> menor pinball (média e ponta): {b.idxmin()[0]} | {b.idxmin()[1]}")
+    print("[testes_sensibilidade.csv]")
+
+
 def main():
     global DETALHADO, JANELA_RECENTE
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1106,6 +1156,8 @@ def main():
     ap.add_argument("--dias-recentes", type=int, default=JANELA_RECENTE, help="janela do nível recente (padrão 365)")
     ap.add_argument("--data-ref", default=None, help="data de referência da época (padrão: rodada mais recente)")
     ap.add_argument("--sem-calibracao", dest="calibrar", action="store_false", help="pula a calibração (mais rápido)")
+    ap.add_argument("--testes", action="store_true",
+                    help="só os testes de sensibilidade (janela da época e do nível recente), a partir do erro_diario.csv")
     a = ap.parse_args()
     DETALHADO = a.detalhado
     JANELA_RECENTE = a.dias_recentes
@@ -1116,6 +1168,11 @@ def main():
     saida.mkdir(parents=True, exist_ok=True)
     ref = pd.Timestamp(a.data_ref) if a.data_ref else None
     ult = None
+    if a.testes:
+        diario = pd.read_csv(saida / "erro_diario.csv", sep=";", decimal=",", encoding="utf-8-sig",
+                             parse_dates=["rodada", "dia"])
+        testes_sensibilidade(longo_diario(excluir_dias(diario)), saida)
+        return
     if a.so_relatorio:
         diario = pd.read_csv(saida / "erro_diario.csv", sep=";", decimal=",", encoding="utf-8-sig",
                              parse_dates=["rodada", "dia"])
