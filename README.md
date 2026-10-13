@@ -2,6 +2,16 @@
 
 Carga líquida = carga − eólica − solar (− MMGD, biomassa, hidráulicas *must run*… nas próximas fases).
 
+## Erro da previsão de carga por antecedência
+`src/erro_carga.py` compara `fac_sintegre_prev_carga_dessem` (D+1 a D+7) com a carga oficial e resume viés,
+desvio, MAPE e quantis por subsistema, mês, antecedência, tipo de dia e hora (média, ponta e perfil).
+O "oficial" é configurável (`OFICIAL` no script ou `--oficial deck|realizado`). Metodologia em
+`docs/metodologia_erro_carga.md`. Feriados nacionais: `data/feriados_nacionais.csv` (ANBIMA).
+```
+python src/erro_carga.py                         # banco, desde 2022
+python src/erro_carga.py --oficial realizado --ini 2024-01-01
+```
+
 ## Renováveis do DESSEM (UTE, PCH, CGH, UHE, MGD)
 `src/gerar_renovaveis.py` lê o banco (`fac_ons_renovaveis`), pega a rodada mais recente e
 estende além do último dia coberto com `nível do último dia x perfil médio de 28 dias`
