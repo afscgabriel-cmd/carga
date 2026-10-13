@@ -586,9 +586,12 @@ def relatorio(longo, saida, perfil=None):
     if DETALHADO:
         for s in SUBS_TERMINAL:
             t = res_mh[(res_mh.metrica == "media") & (res_mh.subsistema == s)]
-            print(f"\n{s}: viés r (%) por mês x antecedência, média diária")
-            print(t.pivot(index="mes", columns="h", values="vies_r").rename(index=dict(enumerate(MESES, 1)))
-                  .round(1).to_string())
+            for col, tit, fmt in [("vies_r", "viés r (%)", 1), ("erro_medio_r", "erro médio |r| (%)", 1),
+                                  ("erro_medio_mw", "erro médio (MW)", 0), ("n", "dias na amostra", 0)]:
+                print(f"\n{s}: {tit} por mês x antecedência, média diária")
+                tab = t.pivot(index="mes", columns="h", values=col).rename(index=dict(enumerate(MESES, 1)))
+                tab.columns = [f"D+{h}" for h in tab.columns]
+                print(tab.round(fmt).to_string())
     return res_h
 
 
